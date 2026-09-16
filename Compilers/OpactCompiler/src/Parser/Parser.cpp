@@ -550,7 +550,6 @@ ExprPtr Parser::parseAssignement()
 {
 	ExprPtr target = this->parseOr();
 
-	// On vérifie le token suivant
 	Token symbolAssign = this->peek(); 
 
 	switch (symbolAssign.getKind()) {
@@ -566,7 +565,6 @@ ExprPtr Parser::parseAssignement()
 		case TokenKind::DIV_ASSIGN: {
 			this->consume();
 
-			// Mapper le TokenKind vers l'opérateur binaire correspondant
 			BinaryOp op;
 			switch (symbolAssign.getKind()) {
 				case TokenKind::ADD_ASSIGN: op = BinaryOp::Add; break;
@@ -578,13 +576,11 @@ ExprPtr Parser::parseAssignement()
 
 			ExprPtr val = this->parseAssignement();
 
-			// On transforme 'x += y' en 'x = x + y'
-			ExprPtr rhs = std::make_unique<BinaryExpr>(op,target->clone(), std::move(val));
-			return std::make_unique<AssignExpr>(std::move(target), std::move(rhs), AssignKind::Assign);
+			ExprPtr rhs = std::make_unique<BinaryExpr>(op, target->clone(), std::move(val));
+			return std::make_unique<AssignExpr>(std::move(target), std::move(rhs), AssignKind::Assign); // <-- Ensured this returns
 		}
 
 		default:
-			// Ce n'est pas une affectation, on retourne simplement l'expression analysée
 			return target;
 	}
 }
@@ -692,7 +688,7 @@ ExprPtr Parser::parseMultiplicative()
 
 		if (this->match(TokenKind::PROD))
 			op = BinaryOp::Mul;
-		if (this->match(TokenKind::POWER))
+		else if (this->match(TokenKind::POWER))
 			op = BinaryOp::Power;
 		else if (this->match(TokenKind::DIV))
 			op = BinaryOp::Div;
