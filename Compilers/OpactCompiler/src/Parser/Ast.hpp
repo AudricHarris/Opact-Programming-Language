@@ -100,7 +100,7 @@ struct IdentifierExpr : Expression {
 enum class BinaryOp {
 	Add, Sub, Mul, Div, Mod,
 	Eq, Ne, Lt, Gt, Le, Ge,
-	And, BitAnd, Or
+	And, BitAnd, Or, Power
 };
 
 enum class UnaryOp { Negate, Not };

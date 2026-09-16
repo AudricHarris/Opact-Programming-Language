@@ -1,9 +1,5 @@
 #include "TokenType.hpp"
-#include <optional>
 #include <string>
-#include <string_view>
-#include <unordered_map>
-
 
 // This only serves for debugging //
 std::string Token::toString() {
@@ -70,6 +66,8 @@ std::string Token::toString() {
 			return "SUB  ";
 		case TokenKind::PROD:
 			return "PROD  ";
+		case TokenKind::POWER:
+			return "POWER  ";
 		case TokenKind::DIV:
 			return "DIV  ";
 		case TokenKind::MOD:

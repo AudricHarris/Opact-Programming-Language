@@ -550,13 +550,43 @@ ExprPtr Parser::parseAssignement()
 {
 	ExprPtr target = this->parseOr();
 
-	if (this->match(TokenKind::ASSIGN))
-	{
-		ExprPtr val = this->parseExpression();
-		return std::make_unique<AssignExpr>(std::move(target), std::move(val), AssignKind::Assign);
-	}
+	// On vérifie le token suivant
+	Token symbolAssign = this->peek(); 
 
-	return target;
+	switch (symbolAssign.getKind()) {
+		case TokenKind::ASSIGN: {
+			this->consume();
+			ExprPtr val = this->parseAssignement();
+			return std::make_unique<AssignExpr>(std::move(target), std::move(val), AssignKind::Assign);
+		}
+
+		case TokenKind::ADD_ASSIGN:
+		case TokenKind::SUB_ASSIGN:
+		case TokenKind::MUL_ASSIGN:
+		case TokenKind::DIV_ASSIGN: {
+			this->consume();
+
+			// Mapper le TokenKind vers l'opérateur binaire correspondant
+			BinaryOp op;
+			switch (symbolAssign.getKind()) {
+				case TokenKind::ADD_ASSIGN: op = BinaryOp::Add; break;
+				case TokenKind::SUB_ASSIGN: op = BinaryOp::Sub; break;
+				case TokenKind::MUL_ASSIGN: op = BinaryOp::Mul; break;
+				case TokenKind::DIV_ASSIGN: op = BinaryOp::Div; break;
+				default: break;
+			}
+
+			ExprPtr val = this->parseAssignement();
+
+			// On transforme 'x += y' en 'x = x + y'
+			ExprPtr rhs = std::make_unique<BinaryExpr>(op,target->clone(), std::move(val));
+			return std::make_unique<AssignExpr>(std::move(target), std::move(rhs), AssignKind::Assign);
+		}
+
+		default:
+			// Ce n'est pas une affectation, on retourne simplement l'expression analysée
+			return target;
+	}
 }
 
 ExprPtr Parser::parseOr()
@@ -662,6 +692,8 @@ ExprPtr Parser::parseMultiplicative()
 
 		if (this->match(TokenKind::PROD))
 			op = BinaryOp::Mul;
+		if (this->match(TokenKind::POWER))
+			op = BinaryOp::Power;
 		else if (this->match(TokenKind::DIV))
 			op = BinaryOp::Div;
 		else if (this->match(TokenKind::MOD))

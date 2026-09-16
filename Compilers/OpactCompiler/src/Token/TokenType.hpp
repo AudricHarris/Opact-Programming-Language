@@ -51,6 +51,7 @@ enum class TokenKind {
 	ADD,
 	SUB,
 	PROD,
+	POWER,
 	DIV,
 	MOD,
 	LT,  // <

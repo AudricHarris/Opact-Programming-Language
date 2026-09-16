@@ -9,51 +9,54 @@
 /*------------*/
 
 enum class State : uint8_t {
-	S0,    // start
-	S1,    // after '+'
-	S2,    // after '-'
-	S3,    // after '/'
-	S4,    // standard decimal integer digits
-	S5,    // digit(s) then '.', expects at least one more digit
-	S6,    // float digits after '.'
-	S7,    // identifier / keyword
-	S8,    // after '='
-	S9,    // after '<'
-	S10,   // after '>'
-	S11,   // after '&'
-	S12,   // after '!'
-	S13,   // after '|'
-	S14,   // inside double-quoted string
-	S15,   // single-quote open
-	S16,   // single char body inside single-quotes
-	S17,   // backslash escape inside single-quotes
-	S18,   // character after escape sequence, awaiting closing quote
+    S0,    // start
+    S1,    // after '+'
+    S2,    // after '-'
+    S3,    // after '/'
+    S4,    // standard decimal integer digits
+    S5,    // digit(s) then '.', expects at least one more digit
+    S6,    // float digits after '.'
+    S7,    // identifier / keyword
+    S8,    // after '='
+    S9,    // after '<'
+    S10,   // after '>'
+    S11,   // after '&'
+    S12,   // after '!'
+    S13,   // after '|'
+    S14,   // inside double-quoted string
+    S15,   // single-quote open
+    S16,   // single char body inside single-quotes
+    S17,   // backslash escape inside single-quotes
+    S18,   // character after escape sequence, awaiting closing quote
+    S19,   // after '*'
 
-	// Prefixed Literal States
-	S4_ZERO,       // saw leading '0'
-	S4_BIN_PREFIX, // saw '0b' or '0B', expecting binary digits
-	S4_BIN,        // consuming binary digits
-	S4_OCT_PREFIX, // saw '0o' or '0O', expecting octal digits
-	S4_OCT,        // consuming octal digits
-	S4_HEX_PREFIX, // saw '0x' or '0X', expecting hex digits
-	S4_HEX,        // consuming hex digits
+    // Prefixed Literal States
+    S4_ZERO,       // saw leading '0'
+    S4_BIN_PREFIX, // saw '0b' or '0B', expecting binary digits
+    S4_BIN,        // consuming binary digits
+    S4_OCT_PREFIX, // saw '0o' or '0O', expecting octal digits
+    S4_OCT,        // consuming octal digits
+    S4_HEX_PREFIX, // saw '0x' or '0X', expecting hex digits
+    S4_HEX,        // consuming hex digits
 
-	// Multi-character operator terminal states
-	S1_PLUS_PLUS,   // "++"
-	S2_MINUS_MINUS, // "--"
-	S2_ARROW,       // "->"
-	S8_FAT_ARROW,   // "=>"
-	S9_LE,          // "<="
-	S10_GE,         // ">="
-	S11_BORROW,     // "&="
-	S11_DOUBLE_AND, // "&&"
-	S12_NE,         // "!="
-	S8_EQ,          // "=="
-	S13_OR,         // "||"
+    // Multi-character operator terminal states
+    S1_PLUS_PLUS,   // "++"
+    S2_MINUS_MINUS, // "--"
+    S2_ARROW,       // "->"
+    S8_FAT_ARROW,   // "=>"
+    S9_LE,          // "<="
+    S10_GE,         // ">="
+    S11_BORROW,     // "&="
+    S11_DOUBLE_AND, // "&&"
+    S12_NE,         // "!="
+    S8_EQ,          // "=="
+    S13_OR,         // "||"
+    S19_POWER,      // "**"
 
-	END,
-	ERR
+    END,
+    ERR
 };
+
 
 /*------------------*/
 /* Input categories */
@@ -83,12 +86,13 @@ enum class InputCat : uint8_t {
 	BRACKET,      // 20
 	UNI_CHAR,     // 21
 	BACKSLASH,    // 22
-	OTHER,        // 23
+	PROD,         // 23
+	OTHER,        // 24
 	COUNT
 };
 
-static constexpr int NSTATES = 38;
-static constexpr int NCATS = static_cast<int>(InputCat::COUNT); // 24
+static constexpr int NSTATES = 39;
+static constexpr int NCATS = static_cast<int>(InputCat::COUNT); // 25
 
 static constexpr State E = State::END;
 static constexpr State ER = State::ERR;
@@ -100,100 +104,45 @@ static constexpr State ER = State::ERR;
 /*-------------------------------------------------------------------------------------------------*/
 
 static constexpr State T[NSTATES][NCATS] = {
-	/*S0 */
-	{State::S1, State::S2, State::S3, State::S4_ZERO, State::S4, State::S4, E,
-		State::S7, State::S7, State::S7, State::S7, State::S7, State::S8,
-		State::S9, State::S10, State::S11, State::S12, State::S13, State::S14,
-		State::S15, E, E, E, ER},
-
-	/*S1  after '+' */
-	{State::S1_PLUS_PLUS, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S2  after '-' */
-	{E, State::S2_MINUS_MINUS, E, E, E, E, E, E, E, E, E, E, E, State::S2_ARROW, E, E, E, E, E, E, E, E, E, E},
-
-	/*S3  after '/' */
-	{E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S4  integer digits */
-	{E, E, E, State::S4, State::S4, State::S4, State::S5, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S5  after digit+dot */
-	{ER, ER, ER, State::S6, State::S6, State::S6, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER},
-
-	/*S6  float digits after '.' */
-	{E, E, E, State::S6, State::S6, State::S6, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S7  identifier / keyword */
-	{E, E, E, State::S7, State::S7, State::S7, E, State::S7, State::S7, State::S7, State::S7, State::S7, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S8  after '=' */
-	{E, E, E, E, E, E, E, E, E, E, E, E, State::S8_EQ, E, State::S8_FAT_ARROW, E, E, E, E, E, E, E, E, E},
-
-	/*S9  after '<' */
-	{E, E, E, E, E, E, E, E, E, E, E, E, State::S9_LE, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S10 after '>' */
-	{E, E, E, E, E, E, E, E, E, E, E, E, State::S10_GE, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S11 after '&' */
-	{E, E, E, E, E, E, E, E, E, E, E, E, State::S11_BORROW, E, E, State::S11_DOUBLE_AND, E, E, E, E, E, E, E, E},
-
-	/*S12 after '!' */
-	{E, E, E, E, E, E, E, E, E, E, E, E, State::S12_NE, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S13 after '|' */
-	{ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, State::S13_OR, ER, ER, ER, ER, ER, ER},
-
-	/*S14 double-quoted string */
-	{State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, E, State::S14, State::S14, State::S14, State::S14, State::S14},
-
-	/*S15 opening single-quote */
-	{State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, ER, State::S16, State::S16, State::S17, State::S16},
-
-	/*S16 single char body */
-	{ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, E, ER, ER, ER, ER},
-
-	/*S17 escape sequence body */
-	{State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18},
-
-	/*S18 after escape body */
-	{ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, E, ER, ER, ER, ER},
-
-	/*S4_ZERO: Saw initial '0' */
-	{E, E, E, State::S4, State::S4, State::S4, State::S5, State::S4_BIN_PREFIX, State::S4_OCT_PREFIX, State::S4_HEX_PREFIX, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S4_BIN_PREFIX: Saw '0b' */
-	{ER, ER, ER, State::S4_BIN, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER},
-
-	/*S4_BIN: Consuming binary digits */
-	{E, E, E, State::S4_BIN, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S4_OCT_PREFIX: Saw '0o' */
-	{ER, ER, ER, State::S4_OCT, State::S4_OCT, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER},
-
-	/*S4_OCT: Consuming octal digits */
-	{E, E, E, State::S4_OCT, State::S4_OCT, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	/*S4_HEX_PREFIX: Saw '0x' */
-	{ER, ER, ER, State::S4_HEX, State::S4_HEX, State::S4_HEX, ER, State::S4_HEX, ER, ER, State::S4_HEX, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER},
-
-	/*S4_HEX: Consuming hex digits */
-	{E, E, E, State::S4_HEX, State::S4_HEX, State::S4_HEX, E, State::S4_HEX, E, E, State::S4_HEX, E, E, E, E, E, E, E, E, E, E, E, E, E},
-
-	// Terminal states
-	/*S1_PLUS_PLUS   */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S2_MINUS_MINUS */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S2_ARROW       */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S8_FAT_ARROW   */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S9_MOVE        */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S9_LE          */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S10_GE         */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S11_BORROW     */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S11_DOUBLE_AND */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S12_NE         */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S8_EQ          */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
-	/*S13_OR         */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S0 */ {State::S1, State::S2, State::S3, State::S4_ZERO, State::S4, State::S4, E, State::S7, State::S7, State::S7, State::S7, State::S7, State::S8, State::S9, State::S10, State::S11, State::S12, State::S13, State::S14, State::S15, E, E, E, State::S19, ER},
+    /*S1 */ {State::S1_PLUS_PLUS, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S2 */ {E, State::S2_MINUS_MINUS, E, E, E, E, E, E, E, E, E, E, E, State::S2_ARROW, E, E, E, E, E, E, E, E, E, E, E},
+    /*S3 */ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S4 */ {E, E, E, State::S4, State::S4, State::S4, State::S5, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S5 */ {ER, ER, ER, State::S6, State::S6, State::S6, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER},
+    /*S6 */ {E, E, E, State::S6, State::S6, State::S6, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S7 */ {E, E, E, State::S7, State::S7, State::S7, E, State::S7, State::S7, State::S7, State::S7, State::S7, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S8 */ {E, E, E, E, E, E, E, E, E, E, E, E, State::S8_EQ, E, State::S8_FAT_ARROW, E, E, E, E, E, E, E, E, E, E},
+    /*S9 */ {E, E, E, E, E, E, E, E, E, E, E, E, State::S9_LE, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S10*/ {E, E, E, E, E, E, E, E, E, E, E, E, State::S10_GE, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S11*/ {E, E, E, E, E, E, E, E, E, E, E, E, State::S11_BORROW, E, E, State::S11_DOUBLE_AND, E, E, E, E, E, E, E, E, E},
+    /*S12*/ {E, E, E, E, E, E, E, E, E, E, E, E, State::S12_NE, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S13*/ {ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, State::S13_OR, ER, ER, ER, ER, ER, E, ER},
+    /*S14*/ {State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14, E, State::S14, State::S14, State::S14, State::S14, State::S14, State::S14},
+    /*S15*/ {State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, State::S16, ER, State::S16, State::S16, State::S17, State::S16, State::S16},
+    /*S16*/ {ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, E, ER, ER, ER, ER, ER},
+    /*S17*/ {State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18, State::S18},
+    /*S18*/ {ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, E, ER, ER, ER, ER},
+    /*S19*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, State::S19_POWER, E}, // After '*'
+    /*S4_ZERO*/ {E, E, E, State::S4, State::S4, State::S4, State::S5, State::S4_BIN_PREFIX, State::S4_OCT_PREFIX, State::S4_HEX_PREFIX, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S4_BIN_PREFIX*/ {ER, ER, ER, State::S4_BIN, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER},
+    /*S4_BIN*/ {E, E, E, State::S4_BIN, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S4_OCT_PREFIX*/ {ER, ER, ER, State::S4_OCT, State::S4_OCT, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER},
+    /*S4_OCT*/ {E, E, E, State::S4_OCT, State::S4_OCT, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S4_HEX_PREFIX*/ {ER, ER, ER, State::S4_HEX, State::S4_HEX, State::S4_HEX, ER, State::S4_HEX, ER, ER, State::S4_HEX, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER, ER},
+    /*S4_HEX*/ {E, E, E, State::S4_HEX, State::S4_HEX, State::S4_HEX, E, State::S4_HEX, E, E, State::S4_HEX, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S1_PLUS_PLUS*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S2_MINUS_MINUS*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S2_ARROW*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S8_FAT_ARROW*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S9_LE*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S10_GE*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S11_BORROW*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S11_DOUBLE_AND*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S12_NE*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S8_EQ*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S13_OR*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
+    /*S19_POWER*/ {E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E, E},
 };
 
 /*------------------------------*/
@@ -201,45 +150,45 @@ static constexpr State T[NSTATES][NCATS] = {
 /*------------------------------*/
 
 static constexpr TokenKind StateToToken[] = {
-	/* S0                */ TokenKind::UNKNOWN,
-	/* S1                */ TokenKind::ADD,
-	/* S2                */ TokenKind::SUB,
-	/* S3                */ TokenKind::DIV,
-	/* S4                */ TokenKind::LIT_INT,
-	/* S5                */ TokenKind::UNKNOWN,
-	/* S6                */ TokenKind::LIT_FLOAT,
-	/* S7                */ TokenKind::IDENTIFIER,
-	/* S8                */ TokenKind::ASSIGN,
-	/* S9                */ TokenKind::LT,
-	/* S10               */ TokenKind::GT,
-	/* S11               */ TokenKind::AND,
-	/* S12               */ TokenKind::NOT,
-	/* S13               */ TokenKind::UNKNOWN,
-	/* S14               */ TokenKind::LIT_STRING,
-	/* S15               */ TokenKind::LIT_CHAR,
-	/* S16               */ TokenKind::LIT_CHAR,
-	/* S17               */ TokenKind::LIT_CHAR,
-	/* S18               */ TokenKind::LIT_CHAR,
-	/* S4_ZERO           */ TokenKind::LIT_INT,
-	/* S4_BIN_PREFIX     */ TokenKind::UNKNOWN,
-	/* S4_BIN            */ TokenKind::LIT_INT,
-	/* S4_OCT_PREFIX     */ TokenKind::UNKNOWN,
-	/* S4_OCT            */ TokenKind::LIT_INT,
-	/* S4_HEX_PREFIX     */ TokenKind::UNKNOWN,
-	/* S4_HEX            */ TokenKind::LIT_INT,
-	/* S1_PLUS_PLUS      */ TokenKind::INCREMENT,
-	/* S2_MINUS_MINUS    */ TokenKind::DECREMENT,
-	/* S2_ARROW          */ TokenKind::RETURN_TYPE,
-	/* S8_FAT_ARROW      */ TokenKind::FAT_ARROW,
-	/* S9_LE             */ TokenKind::LE,
-	/* S10_GE            */ TokenKind::GE,
-	/* S11_BORROW        */ TokenKind::BORROW,
-	/* S11_DOUBLE_AND    */ TokenKind::DOUBLE_AND,
-	/* S12_NE            */ TokenKind::NE,
-	/* S8_EQ             */ TokenKind::EQ,
-	/* S13_OR            */ TokenKind::OR,
-	/* END               */ TokenKind::UNKNOWN,
-	/* ERR               */ TokenKind::UNKNOWN
+    /* S0             */ TokenKind::UNKNOWN,
+    /* S1             */ TokenKind::ADD,
+    /* S2             */ TokenKind::SUB,
+    /* S3             */ TokenKind::DIV,
+    /* S4             */ TokenKind::LIT_INT,
+    /* S5             */ TokenKind::UNKNOWN,
+    /* S6             */ TokenKind::LIT_FLOAT,
+    /* S7             */ TokenKind::IDENTIFIER,
+    /* S8             */ TokenKind::ASSIGN,
+    /* S9             */ TokenKind::LT,
+    /* S10            */ TokenKind::GT,
+    /* S11            */ TokenKind::AND,
+    /* S12            */ TokenKind::NOT,
+    /* S13            */ TokenKind::UNKNOWN,
+    /* S14            */ TokenKind::LIT_STRING,
+    /* S15            */ TokenKind::LIT_CHAR,
+    /* S16            */ TokenKind::LIT_CHAR,
+    /* S17            */ TokenKind::LIT_CHAR,
+    /* S18            */ TokenKind::LIT_CHAR,
+    /* S19            */ TokenKind::PROD,
+    /* S4_ZERO        */ TokenKind::LIT_INT,
+    /* S4_BIN_PREFIX  */ TokenKind::UNKNOWN,
+    /* S4_BIN         */ TokenKind::LIT_INT,
+    /* S4_OCT_PREFIX  */ TokenKind::UNKNOWN,
+    /* S4_OCT         */ TokenKind::LIT_INT,
+    /* S4_HEX_PREFIX  */ TokenKind::UNKNOWN,
+    /* S4_HEX         */ TokenKind::LIT_INT,
+    /* S1_PLUS_PLUS   */ TokenKind::INCREMENT,
+    /* S2_MINUS_MINUS */ TokenKind::DECREMENT,
+    /* S2_ARROW       */ TokenKind::RETURN_TYPE,
+    /* S8_FAT_ARROW   */ TokenKind::FAT_ARROW,
+    /* S9_LE          */ TokenKind::LE,
+    /* S10_GE         */ TokenKind::GE,
+    /* S11_BORROW     */ TokenKind::BORROW,
+    /* S11_DOUBLE_AND */ TokenKind::DOUBLE_AND,
+    /* S12_NE         */ TokenKind::NE,
+    /* S8_EQ          */ TokenKind::EQ,
+    /* S13_OR         */ TokenKind::OR,
+    /* S19_POWER      */ TokenKind::POWER
 };
 
 /*------------------------------------------------------------------*/
@@ -268,7 +217,7 @@ static constexpr InputCat catTable[128] = {
 	InputCat::QUOTE_S,   // 0x27 '\''
 	InputCat::BRACKET,   // 0x28 '('
 	InputCat::BRACKET,   // 0x29 ')'
-	InputCat::UNI_CHAR,  // 0x2A '*'
+	InputCat::PROD,  // 0x2A '*'
 	InputCat::PLUS,      // 0x2B '+'
 	InputCat::UNI_CHAR,  // 0x2C ','
 	InputCat::MINUS,     // 0x2D '-'
@@ -456,8 +405,6 @@ static inline TokenKind singleCharKind(char c) {
 			return TokenKind::SEMI;
 		case ',':
 			return TokenKind::COMMA;
-		case '*':
-			return TokenKind::PROD;
 		case '%':
 			return TokenKind::MOD;
 		case '.':
