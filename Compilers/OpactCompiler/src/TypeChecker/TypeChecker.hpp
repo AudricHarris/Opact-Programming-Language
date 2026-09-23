@@ -1,18 +1,18 @@
+#pragma once
 #include "Scope/ScopeManager.hpp"
-#include <string>
-#include <vector>
-
-class Diagnostics
-{
-	private:
-		std::string error;
-		int line;
-	public:
-		void GenerateError();
-};
+#include "Types/PrimitiveType.hpp"
+#include "Types/FunctionType.hpp"
+#include "Types/StructType.hpp"
+#include "Symbol/VarSymbol.hpp"
+#include "Symbol/FunctionSymbol.hpp"
+#include "Symbol/ClassSymbol.hpp"
 
 class TypeChecker {
+	public:
+		TypeChecker() = default;
+
+		ScopeManager& getScopeManager() { return scopeManager; }
+
 	private:
 		ScopeManager scopeManager;
-		std::vector<Diagnostics> listErrors;
-};	
+};
