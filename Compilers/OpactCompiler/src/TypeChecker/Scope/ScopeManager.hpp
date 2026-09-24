@@ -10,20 +10,20 @@ class ScopeManager {
 		}
 
 		void enterScope() {
-			Scope* parent = scopes_.empty() ? nullptr : scopes_.back().get();
-			scopes_.push_back(std::make_unique<Scope>(parent));
+			Scope* parent = scopes.empty() ? nullptr : scopes.back().get();
+			scopes.push_back(std::make_unique<Scope>(parent));
 		}
 
 		void exitScope() {
-			if (scopes_.size() > 1) {
-				scopes_.pop_back();
+			if (scopes.size() > 1) {
+				scopes.pop_back();
 			}
 		}
 
 		Scope* currentScope() const {
-			return scopes_.back().get();
+			return scopes.back().get();
 		}
 
 	private:
-		std::vector<std::unique_ptr<Scope>> scopes_;
+		std::vector<std::unique_ptr<Scope>> scopes;
 };

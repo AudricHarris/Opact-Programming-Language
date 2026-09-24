@@ -2,9 +2,9 @@
 #include "Symbol.hpp"
 #include "../Types/StructType.hpp"
 
-class ClassSymbol : public Symbol {
+class StructSymbol : public Symbol {
 	public:
-		ClassSymbol(std::string name, std::shared_ptr<StructType> structType)
+		StructSymbol(std::string name, std::shared_ptr<StructType> structType)
 			: Symbol(std::move(name), structType) {}
 
 		SymbolKind getKind() const override { return SymbolKind::Class; }

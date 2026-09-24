@@ -5,6 +5,7 @@
 #include "FileReader/FileReader.hpp"
 #include "Lexer/Lexer.hpp"
 #include "Parser/Parser.hpp"
+#include "TypeChecker/TypeChecker.hpp"
 #include <iostream>
 #include <string>
 #include <unordered_map>
@@ -136,6 +137,9 @@ class CompilerPipeline {
 
 			Parser p(std::move(codeTokenized), path, this);
 			ExprPtr file = p.parseModule();
+			
+			TypeChecker t;
+			t.initialize(file);
 
 			return Module{ path, std::move(file) }; 
 		}
