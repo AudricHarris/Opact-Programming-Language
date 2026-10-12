@@ -5,6 +5,8 @@ enum class BuiltinType {
 	Int,
 	Float,
 	Bool,
+	Char,   // added: AST has Char literals
+	Str,    // added: AST has Str literals
 	Void
 };
 
@@ -20,13 +22,15 @@ class PrimitiveType : public Type {
 				case BuiltinType::Int:   return "int";
 				case BuiltinType::Float: return "float";
 				case BuiltinType::Bool:  return "bool";
+				case BuiltinType::Char:  return "char";
+				case BuiltinType::Str:   return "str";
 				case BuiltinType::Void:  return "void";
 			}
 			return "unknown";
 		}
 
 		bool equals(const Type* other) const override {
-			if (other->getKind() != TypeKind::Primitive) return false;
+			if (!other || other->getKind() != TypeKind::Primitive) return false;
 			return type_ == static_cast<const PrimitiveType*>(other)->type_;
 		}
 

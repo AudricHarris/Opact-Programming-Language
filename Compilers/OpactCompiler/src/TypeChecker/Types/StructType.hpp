@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -16,6 +17,8 @@ class StructType : public Type {
 
 		TypeKind getKind() const override { return TypeKind::Struct; }
 
+		const std::string& getName() const { return name_; }   // added
+
 		void addField(const std::string& fieldName, std::shared_ptr<Type> type, size_t offset) {
 			fields_[fieldName] = {fieldName, type, offset};
 		}
@@ -28,7 +31,7 @@ class StructType : public Type {
 		std::string toString() const override { return "struct " + name_; }
 
 		bool equals(const Type* other) const override {
-			if (other->getKind() != TypeKind::Struct) return false;
+			if (!other || other->getKind() != TypeKind::Struct) return false;
 			return name_ == static_cast<const StructType*>(other)->name_;
 		}
 

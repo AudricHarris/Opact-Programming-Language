@@ -23,7 +23,7 @@ class FunctionType : public Type {
 		}
 
 		bool equals(const Type* other) const override {
-			if (other->getKind() != TypeKind::Function) return false;
+			if (!other || other->getKind() != TypeKind::Function) return false;
 			auto fn = static_cast<const FunctionType*>(other);
 			if (!returnType_->equals(fn->returnType_.get())) return false;
 			if (paramTypes_.size() != fn->paramTypes_.size()) return false;

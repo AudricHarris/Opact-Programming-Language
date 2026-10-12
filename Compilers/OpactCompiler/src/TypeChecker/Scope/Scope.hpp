@@ -2,6 +2,7 @@
 #include <unordered_map>
 #include <string>
 #include <memory>
+#include <iostream>
 #include "../Symbol/Symbol.hpp"
 
 class Scope {
@@ -10,13 +11,13 @@ class Scope {
 
 		bool declareSymbol(const std::string& name, std::shared_ptr<Symbol> symbol) {
 			if (symbols.find(name) != symbols.end()) {
-				return false; // Symbol already declared in current scope
+				return false; // Symbol already declared in current scope[cite: 4]
 			}
 			symbols[name] = symbol;
 			return true;
 		}
 
-		std::shared_ptr<Symbol> lookup(const std::string& name) {
+		[[nodiscard]] std::shared_ptr<Symbol> lookup(const std::string& name) const {
 			auto it = symbols.find(name);
 			if (it != symbols.end()) {
 				return it->second;
@@ -27,7 +28,19 @@ class Scope {
 			return nullptr;
 		}
 
-		Scope* getParent() const { return parent; }
+		[[nodiscard]] Scope* getParent() const { return parent; }
+
+		// Debugging printer for symbols in this scope
+		void dumpSymbols() const {
+			if (symbols.empty()) {
+				std::cout << "  [Scope is empty]\n";
+				return;
+			}
+			for (const auto& [name, symbol] : symbols) {
+				std::cout << "  * Symbol Name: \"" << name << "\"";
+				std::cout << "\n";
+			}
+		}
 
 	private:
 		Scope* parent;
