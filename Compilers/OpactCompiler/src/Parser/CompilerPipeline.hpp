@@ -23,6 +23,7 @@ namespace fs = std::filesystem;
 
 struct Module {
 	std::string filePath;
+	std::vector<std::string> modulePath;
 	ExprPtr astRoot;
 };
 
@@ -79,23 +80,31 @@ class CompilerPipeline {
 			for (auto& t : workers) {
 				if (t.joinable()) t.join();
 			}
+
+			this->runTypeCheckingPass();
+		}
+
+		// Helper for TypeChecker to look up other modules
+		const Module* getModuleByPath(const std::string& canonicalPath) const {
+			auto it = parsedModules.find(canonicalPath);
+			if (it != parsedModules.end()) {
+				return &it->second;
+			}
+			return nullptr;
 		}
 
 	private:
 		void workerLoop() {
 			while (true) {
 				std::string fileToParse;
-
 				{
 					std::unique_lock<std::mutex> lock(this->queueMutex);
-
-					// Wait until there is work available OR all workers are idle (queue drained)
 					this->cv.wait(lock, [this]() {
 							return !this->workQueue.empty() || this->activeWorkers == 0;
 							});
 
 					if (this->workQueue.empty() && this->activeWorkers == 0) {
-						this->cv.notify_all(); // Wake up any remaining threads so they can exit
+						this->cv.notify_all();
 						return;
 					}
 
@@ -123,25 +132,30 @@ class CompilerPipeline {
 			std::optional<std::string> content = readFile(path.c_str());
 			if (!content.has_value()) {
 				std::cerr << "File : " << path << " was not found\n";
-				return Module{ path, nullptr }; 
+				return Module{ path, {}, nullptr }; 
 			}
 
 			const std::string &code = content.value();
 
 			Lexer l(code);
 			std::vector<Token> codeTokenized = l.Tokenize();
-			for (Token t : codeTokenized)
-				std::cout << t.toString();
-
 			this->nbtokens += static_cast<int>(codeTokenized.size()); 
 
 			Parser p(std::move(codeTokenized), path, this);
 			ExprPtr file = p.parseModule();
 			
-			TypeChecker t;
-			t.initialize(file);
+			std::vector<std::string> imports = p.importFiles;
 
-			return Module{ path, std::move(file) }; 
+			return Module{ path, imports, std::move(file) }; 
+		}
+
+		void runTypeCheckingPass() {
+			// Iterate through all parsed modules and perform global symbol collection & type checking
+			for (auto& [path, module] : parsedModules) {
+				if (!module.astRoot) continue;
+				TypeChecker t(this, path);
+				t.initialize(module.astRoot);
+			}
 		}
 };
 

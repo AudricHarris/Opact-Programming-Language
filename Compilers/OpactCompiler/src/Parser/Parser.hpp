@@ -70,6 +70,8 @@ class Parser {
 		Parser(std::vector<Token> tok, std::string path = "", CompilerPipeline* pipe = nullptr)
 			: tokens(std::move(tok)), idx(0), filePath(std::move(path)), pipeline(pipe) {}
 
+		std::vector<std::string> importFiles;
+
 		// Methods
 		
 		/** @brief Parse Module is for the initial file this will call parse top level as long it is not at the end of a file*/

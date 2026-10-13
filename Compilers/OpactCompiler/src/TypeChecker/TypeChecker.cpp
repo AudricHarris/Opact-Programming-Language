@@ -1,5 +1,8 @@
 #include "TypeChecker.hpp"
 #include "../Parser/Ast.hpp"
+#include "Parser/CompilerPipeline.hpp"
+#include "TypeChecker/Symbol/VarSymbol.hpp"
+#include <algorithm>
 #include <iostream>
 #include <utility>
 
@@ -20,7 +23,10 @@ bool isNumeric(const std::shared_ptr<Type>& t) {
 }
 } // namespace
 
-TypeChecker::TypeChecker() : currentType(prim(BuiltinType::Void)) {}
+
+
+TypeChecker::TypeChecker(CompilerPipeline* pipeline, const std::string& filePath)
+	: pipeline(pipeline), currentFilePath(filePath), currentType(prim(BuiltinType::Void)) {}
 
 void TypeChecker::reportError(const std::string& message) {
 	++errorCount_;
@@ -323,5 +329,45 @@ void TypeChecker::visit(WhileExpr& node) {
 		}
 	}
 	if (node.loopBranch) typeOf(*node.loopBranch);
+	currentType = prim(BuiltinType::Void);
+}
+
+void TypeChecker::visit(ImportExpr& node) {
+	if (!pipeline) return;
+
+	std::string actualPath = "";
+	for (const auto& seg : node.path.segments) {
+		actualPath.append(seg + "/");
+	}
+	if (!actualPath.empty()) actualPath.erase(actualPath.size() - 1);
+	actualPath.append(".op");
+
+	fs::path targetPath(actualPath);
+	if (!currentFilePath.empty() && targetPath.is_relative()) {
+		fs::path parentDir = fs::path(currentFilePath).parent_path();
+		targetPath = (parentDir / targetPath).lexically_normal();
+	}
+
+
+	const Module* importedModule = this->pipeline->getModuleByPath(targetPath.string());
+	if (!importedModule || !importedModule->astRoot) {
+		reportError("Could not resolve imported module: " + targetPath.string());
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+	if (auto* block = dynamic_cast<Block*>(importedModule->astRoot.get())) {
+		for (const auto& expr : block->expressions) {
+			if (auto* fn = dynamic_cast<FunctionDeclExpr*>(expr.get())) {
+				if (fn->isPublic) {
+					if (node.isSelectiveImport && !(std::find(node.importedSymbols.begin(), node.importedSymbols.end(), fn->name) != node.importedSymbols.end())) continue;
+					
+					auto fnType = buildFunctionType(*fn);
+					auto sym = std::make_shared<FunctionSymbol>(fn->name, fnType);
+					scopeManager.declare(fn->name, sym);
+				}
+			}
+		}
+	}
+
 	currentType = prim(BuiltinType::Void);
 }

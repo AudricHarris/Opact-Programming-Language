@@ -3,7 +3,6 @@
 
 #include "../Parser/Ast.hpp"
 #include "Scope/ScopeManager.hpp"
-#include "Symbol/VarSymbol.hpp"
 #include "Symbol/FunctionSymbol.hpp"
 #include "Types/Type.hpp"
 #include "Types/PrimitiveType.hpp"
@@ -14,10 +13,13 @@
 #include <unordered_set>
 #include <vector>
 
+class CompilerPipeline;
+
 class TypeChecker : public ASTVisitor {
 public:
-	TypeChecker();
-
+	TypeChecker(CompilerPipeline* pipeline = nullptr, const std::string& filePath = "");
+	
+	std::string currentFilePath;
 	// Main entry point (public API unchanged: returns the AST-level TypeDesc)
 	TypeDesc check(Expression& node);
 
@@ -39,11 +41,13 @@ public:
 	void visit(FunctionDeclExpr& node) override;
 	void visit(CallExpr& node) override;
 	void visit(ReturnExpr& node) override;
+	void visit(ImportExpr& node) override;
 
 	// Stub out remaining ASTVisitor pure virtuals...
 	void visit(PostfixExpr& node) override {}
 	void visit(BorrowExpr& node) override {}
 	void visit(GenericCallExpr& node) override {}
+	void visit(StructDecl& node) override {}
 	void visit(CastExpr& node) override {}
 	void visit(AssignExpr& node) override {}
 	void visit(LoopExpr& node) override {}
@@ -54,9 +58,9 @@ public:
 	void visit(YieldExpr& node) override {}
 	void visit(BreakExpr& node) override {}
 	void visit(ContinueExpr& node) override {}
-	void visit(ImportExpr& node) override {}
 
 private:
+	CompilerPipeline* pipeline;
 	ScopeManager scopeManager;
 	std::shared_ptr<Type> currentType;
 	std::shared_ptr<Type> currentReturnType;

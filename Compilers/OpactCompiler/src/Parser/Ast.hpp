@@ -190,6 +190,19 @@ struct GenericCallExpr : Expression {
 	}
 };
 
+struct StructDecl : Expression {
+	ExprPtr callee;
+	std::vector<ExprPtr> arguments;
+
+	StructDecl(ExprPtr callee = nullptr, std::vector<ExprPtr> arguments = {})
+		: callee(std::move(callee)), arguments(std::move(arguments)) {}
+
+	void accept(ASTVisitor& visitor) override;
+	[[nodiscard]] ExprPtr clone() const override {
+		return std::make_unique<StructDecl>(callee ? callee->clone() : nullptr, cloneVector(arguments));
+	}
+};
+
 struct CastExpr : Expression {
 	ExprPtr expr;
 	TypeDesc castType;
@@ -484,6 +497,7 @@ struct ASTVisitor {
 	virtual void visit(BorrowExpr& node) = 0;
 	virtual void visit(CallExpr& node) = 0;
 	virtual void visit(GenericCallExpr& node) = 0;
+	virtual void visit(StructDecl& node) = 0;
 	virtual void visit(CastExpr& node) = 0;
 	virtual void visit(AssignExpr& node) = 0;
 	virtual void visit(VarDeclExpr& node) = 0;
@@ -515,6 +529,7 @@ inline void PostfixExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void BorrowExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void CallExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void GenericCallExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+inline void StructDecl::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void CastExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void AssignExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void VarDeclExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }

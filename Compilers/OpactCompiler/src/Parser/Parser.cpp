@@ -170,6 +170,7 @@ void Parser::addModule(std::vector<std::string> path)
 
 	actualPath.append(".op");
 
+	this->importFiles.push_back(actualPath);
 	this->pipeline->enqueueFile(actualPath, this->filePath);
 }
 
@@ -209,9 +210,14 @@ ExprPtr Parser::parseImport()
 
 	this->addModule(path.segments);
 	this->expect(TokenKind::SEMI, "Expected ';' after import");
-
 	return std::make_unique<ImportExpr>(std::move(path), std::move(importedSymbols), isSelective);
 }
+
+//------------------------//
+//-- Parsing Structurew --//
+//------------------------//
+
+
 
 //----------------------//
 //-- Parsing Function --//
@@ -759,20 +765,33 @@ ExprPtr Parser::parsePostfix(ExprPtr expr)
 			expr = std::make_unique<CallExpr>(std::move(expr), std::move(args));
 			continue;
 		}
+		// 4. Structure/Class defining
+		if (this->match(TokenKind::LBRACE)){
+			std::vector<ExprPtr> args;
+			if (!this->check(TokenKind::RBRACE))
+			{
+				do {
+					args.push_back(this->parseExpression());
+				} while (this->match(TokenKind::COMMA));
+			}
+			this->expect(TokenKind::RBRACE, "Expected '}' after structure arguments");
+			expr = std::make_unique<StructDecl>(std::move(expr), std::move(args));
+			continue;
+		}
 
-		// 4. Postfix Increment
+		// 5. Postfix Increment
 		if (this->match(TokenKind::INCREMENT)) {
 			expr = std::make_unique<PostfixExpr>(PostfixOp::Increment, std::move(expr));
 			continue;
 		}
 
-		// 5. Postfix Decrement
+		// 6. Postfix Decrement
 		if (this->match(TokenKind::DECREMENT)) {
 			expr = std::make_unique<PostfixExpr>(PostfixOp::Decrement, std::move(expr));
 			continue;
 		}
 
-		// 6. Type Casting
+		// 7. Type Casting
 		if (this->match(TokenKind::AS)) {
 			Token castTypeTok = this->expect(TokenKind::IDENTIFIER, "Expected target type after 'as'");
 
