@@ -148,7 +148,7 @@ ExprPtr Parser::parseTopLevel()
 		return this->parseFunction(visibility); 
 	}
 
-	if (this->check(TokenKind::FN))
+	if (this->check(TokenKind::STRUCT))
 	{
 		return this->parseStruct(visibility); 
 	}
