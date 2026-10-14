@@ -148,6 +148,11 @@ ExprPtr Parser::parseTopLevel()
 		return this->parseFunction(visibility); 
 	}
 
+	if (this->check(TokenKind::FN))
+	{
+		return this->parseStruct(visibility); 
+	}
+
 	this->consume();
 	return nullptr;
 }

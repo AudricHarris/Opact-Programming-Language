@@ -32,6 +32,7 @@ enum class TokenKind {
 	PROTECTED,
 	CONTINUE,
 	BREAK,
+	STRUCT,
 	ENUM,
 	MATCH,
 

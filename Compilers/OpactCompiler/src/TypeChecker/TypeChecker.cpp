@@ -125,6 +125,7 @@ void TypeChecker::declareFunction(const FunctionDeclExpr& fn) {
 
 void TypeChecker::declareStructures(const StructDeclExpr& structures) {
 	auto sym = std::make_shared<StructSymbol>(structures.name, buildStructureType(structures));
+	std::cout << "Declaration of structure " << structures.name << "\n";
 	if (!scopeManager.declare(structures.name, sym)) {
 		reportError("Redeclaration of structure: " + structures.name);
 	}

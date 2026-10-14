@@ -366,6 +366,8 @@ static inline TokenKind keywordOrIdent(std::string_view w) {
 				return TokenKind::IMPORT;
 			if (w == "public")
 				return TokenKind::PUBLIC;
+			if (w == "struct")
+				return TokenKind::STRUCT;
 			break;
 		case 7:
 			if (w == "private")

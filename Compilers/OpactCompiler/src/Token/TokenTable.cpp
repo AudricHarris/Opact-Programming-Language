@@ -38,6 +38,8 @@ std::string Token::toString() {
 			return "CONTINUE  ";
 		case TokenKind::BREAK:
 			return "BREAK  ";
+		case TokenKind::STRUCT:
+			return "STRUCT  ";
 		case TokenKind::ENUM:
 			return "ENUM  ";
 		case TokenKind::MATCH:
