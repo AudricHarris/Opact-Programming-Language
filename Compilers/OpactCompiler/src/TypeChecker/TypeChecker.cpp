@@ -1,7 +1,9 @@
 #include "TypeChecker.hpp"
 #include "../Parser/Ast.hpp"
 #include "Parser/CompilerPipeline.hpp"
+#include "TypeChecker/Symbol/StructSymbol.hpp"
 #include "TypeChecker/Symbol/VarSymbol.hpp"
+#include "TypeChecker/Types/StructType.hpp"
 #include <algorithm>
 #include <iostream>
 #include <utility>
@@ -102,12 +104,31 @@ std::shared_ptr<FunctionType> TypeChecker::buildFunctionType(const FunctionDeclE
 	return std::make_shared<FunctionType>(fromDesc(fn.returnType), std::move(params));
 }
 
+std::shared_ptr<StructType> TypeChecker::buildStructureType(const StructDeclExpr& structures) {
+	auto structure = std::make_shared<StructType>(structures.name);
+
+	for ( const auto& att : structures.attributes)
+	{
+		std::cout << att.name << "\n";
+	}
+
+	return structure;
+}
+
 void TypeChecker::declareFunction(const FunctionDeclExpr& fn) {
 	auto sym = std::make_shared<FunctionSymbol>(fn.name, buildFunctionType(fn));
 	if (!scopeManager.declare(fn.name, sym)) {
 		reportError("Redeclaration of function: " + fn.name);
 	}
 	declaredFunctions_.insert(&fn);
+}
+
+void TypeChecker::declareStructures(const StructDeclExpr& structures) {
+	auto sym = std::make_shared<StructSymbol>(structures.name, buildStructureType(structures));
+	if (!scopeManager.declare(structures.name, sym)) {
+		reportError("Redeclaration of structure: " + structures.name);
+	}
+	declaredStructures_.insert(&structures);
 }
 
 void TypeChecker::initialize(const ExprPtr& m) {
@@ -117,7 +138,11 @@ void TypeChecker::initialize(const ExprPtr& m) {
 	if (auto* block = dynamic_cast<Block*>(m.get())) {
 		for (const auto& expr : block->expressions) {
 			if (auto* fn = dynamic_cast<FunctionDeclExpr*>(expr.get())) {
-				declareFunction(*fn);
+				this->declareFunction(*fn);
+			}
+			else if (auto* structObj = dynamic_cast<StructDeclExpr*>(expr.get()))
+			{
+				this->declareStructures(*structObj); 
 			}
 		}
 	}
@@ -141,6 +166,21 @@ void TypeChecker::visit(FunctionDeclExpr& node) {
 	currentReturnType = fromDesc(node.returnType);
 	if (node.body) typeOf(*node.body);
 	currentReturnType = prevReturn;
+
+	scopeManager.exitScope();
+	currentType = prim(BuiltinType::Void);
+}
+
+void TypeChecker::visit(StructDeclExpr& node) {
+	if (!declaredStructures_.count(&node)) declareStructures(node);
+
+	scopeManager.enterScope();
+	for (const auto& p : node.attributes) {
+		auto sym = std::make_shared<VarSymbol>(p.name, fromDesc(p.type), /*isInitialized=*/true);
+		if (!scopeManager.declare(p.name, sym)) {
+			reportError("Duplicate Attribute '" + p.name + "' in structure " + node.name);
+		}
+	}
 
 	scopeManager.exitScope();
 	currentType = prim(BuiltinType::Void);

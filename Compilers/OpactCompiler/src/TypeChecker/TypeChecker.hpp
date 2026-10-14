@@ -39,6 +39,7 @@ public:
 	void visit(IfExpr& node) override;
 	void visit(WhileExpr& node) override;
 	void visit(FunctionDeclExpr& node) override;
+	void visit(StructDeclExpr& node) override;
 	void visit(CallExpr& node) override;
 	void visit(ReturnExpr& node) override;
 	void visit(ImportExpr& node) override;
@@ -47,7 +48,7 @@ public:
 	void visit(PostfixExpr& node) override {}
 	void visit(BorrowExpr& node) override {}
 	void visit(GenericCallExpr& node) override {}
-	void visit(StructDecl& node) override {}
+	void visit(StructCreateExpr& node) override {}
 	void visit(CastExpr& node) override {}
 	void visit(AssignExpr& node) override {}
 	void visit(LoopExpr& node) override {}
@@ -65,13 +66,16 @@ private:
 	std::shared_ptr<Type> currentType;
 	std::shared_ptr<Type> currentReturnType;
 	std::unordered_set<const FunctionDeclExpr*> declaredFunctions_;
+	std::unordered_set<const StructDeclExpr*> declaredStructures_;
 	int errorCount_ = 0;
 
 	std::shared_ptr<Type> typeOf(Expression& node);
 	std::shared_ptr<Type> fromDesc(const TypeDesc& desc);
 	TypeDesc toDesc(const std::shared_ptr<Type>& type) const;
 	std::shared_ptr<FunctionType> buildFunctionType(const FunctionDeclExpr& fn);
+	std::shared_ptr<StructType> buildStructureType(const StructDeclExpr& structure);
 	void declareFunction(const FunctionDeclExpr& fn);
+	void declareStructures(const StructDeclExpr& structure);
 
 	void reportError(const std::string& message);
 };

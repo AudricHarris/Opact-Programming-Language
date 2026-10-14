@@ -213,27 +213,6 @@ ExprPtr Parser::parseImport()
 	return std::make_unique<ImportExpr>(std::move(path), std::move(importedSymbols), isSelective);
 }
 
-//------------------------//
-//-- Parsing Structurew --//
-//------------------------//
-
-
-
-//----------------------//
-//-- Parsing Function --//
-//----------------------//
-bool Parser::parseIsVarDeclRef()
-{
-	size_t offset = 1;
-
-	if (this->peekAt(offset).getKind() == TokenKind::MUT) offset++;
-
-	bool hasType = (this->peekAt(offset).getKind() == TokenKind::IDENTIFIER);
-	bool hasName = (this->peekAt(offset + 1).getKind() == TokenKind::IDENTIFIER);
-
-	return hasType && hasName;
-}
-
 DataType determineType(const Token& t)
 {
 	const std::string& word = t.getWord();
@@ -257,6 +236,70 @@ DataType determineType(const Token& t)
 	if (word == "void") return DataType::Void;
 
 	return DataType::Custom;
+}
+
+//-----------------------//
+//-- Parsing Structure --//
+//-----------------------//
+
+ExprPtr Parser::parseStruct(std::optional<Token> visib)
+{
+	this->consume(); // TokenKind::STRUCT
+
+	bool isPublic = false;
+	if (visib.has_value() && visib->getKind() == TokenKind::PUBLIC)
+	{
+		isPublic = true;
+	}
+
+	Token nameTok = this->expect(TokenKind::IDENTIFIER, "Expected identifier as name");
+	std::string name = nameTok.getWord();
+	
+	this->expect(TokenKind::LBRACE, "Expected '{' for opening structure body");
+
+	std::vector<StructureField> fields;
+	do
+		{
+			bool isMut = false;
+			if (this->check(TokenKind::MUT))
+			{
+				isMut = true;
+				this->consume();
+			}
+
+			Token ptypeTok = this->expect(TokenKind::IDENTIFIER, "Expected type for the param");
+			Token pnameTok = this->expect(TokenKind::IDENTIFIER, "Expected name for the param");
+
+			std::optional<ExprPtr> defaultVal = std::nullopt;
+			if (this->match(TokenKind::ASSIGN))
+			{
+				defaultVal = this->parseExpression();
+			}
+
+			TypeDesc ptype;
+			ptype.type = determineType(ptypeTok);
+			ptype.customTypeName = ptypeTok.getWord();
+
+			fields.emplace_back(pnameTok.getWord(), std::move(ptype), isMut, std::move(defaultVal));
+		}
+		while (this->match(TokenKind::RBRACE));
+	
+	return std::make_unique<StructDeclExpr>(std::move(name), std::move(fields), isPublic);
+}
+
+//----------------------//
+//-- Parsing Function --//
+//----------------------//
+bool Parser::parseIsVarDeclRef()
+{
+	size_t offset = 1;
+
+	if (this->peekAt(offset).getKind() == TokenKind::MUT) offset++;
+
+	bool hasType = (this->peekAt(offset).getKind() == TokenKind::IDENTIFIER);
+	bool hasName = (this->peekAt(offset + 1).getKind() == TokenKind::IDENTIFIER);
+
+	return hasType && hasName;
 }
 
 ExprPtr Parser::parseFunction(std::optional<Token> visib)
@@ -775,7 +818,7 @@ ExprPtr Parser::parsePostfix(ExprPtr expr)
 				} while (this->match(TokenKind::COMMA));
 			}
 			this->expect(TokenKind::RBRACE, "Expected '}' after structure arguments");
-			expr = std::make_unique<StructDecl>(std::move(expr), std::move(args));
+			expr = std::make_unique<StructCreateExpr>(std::move(expr), std::move(args));
 			continue;
 		}
 

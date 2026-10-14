@@ -80,6 +80,8 @@ class Parser {
 		ExprPtr parseTopLevel();
 		/** @brief Parse Import checks the keyword import and adds a expression */
 		ExprPtr parseImport();
+		/** @brief Parse structure decl with attributes */
+		ExprPtr parseStruct(std::optional<Token> visib);
 		/** @brief Parse function decl with params and returns things */
 		ExprPtr parseFunction(std::optional<Token> visib);
 		/** @brief Parses block so this is {[expressions]} so just a list of expressions */
