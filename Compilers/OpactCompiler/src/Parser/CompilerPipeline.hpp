@@ -2,10 +2,14 @@
 #define COMPILER_PIPELINE_HPP
 
 #include "Ast.hpp"
-#include "FileReader/FileReader.hpp"
-#include "Lexer/Lexer.hpp"
-#include "Parser/Parser.hpp"
-#include "TypeChecker/TypeChecker.hpp"
+#include "../FileReader/FileReader.hpp"
+#include "../Lexer/Lexer.hpp"
+#include "Parser.hpp"
+#include "../TypeChecker/TypeChecker.hpp"
+#include "../CodeGen/CodeGenerator.hpp"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include <iostream>
 #include <string>
 #include <unordered_map>
@@ -150,11 +154,48 @@ class CompilerPipeline {
 		}
 
 		void runTypeCheckingPass() {
-			// Iterate through all parsed modules and perform global symbol collection & type checking
 			for (auto& [path, module] : parsedModules) {
 				if (!module.astRoot) continue;
 				TypeChecker t(this, path);
 				t.initialize(module.astRoot);
+
+				llvm::LLVMContext llvmContext;
+				CodeGenerator codegen("my_module", llvmContext);
+
+				if (module.astRoot) {
+					module.astRoot->accept(codegen);
+				}
+
+				if (!llvm::verifyModule(*codegen.getModule(), &llvm::errs())) {
+					std::string outputPath = path;
+					size_t dotPos = outputPath.find_last_of('.');
+					if (dotPos != std::string::npos) {
+						outputPath = outputPath.substr(0, dotPos);
+					}
+					std::string llPath = outputPath + ".ll";
+					std::string exePath = outputPath + ".x";
+
+					std::error_code ec;
+					llvm::raw_fd_ostream dest(llPath, ec);
+					if (ec) {
+						std::cerr << "Could not open output file for LLVM IR: " << ec.message() << "\n";
+					} else {
+						codegen.getModule()->print(dest, nullptr);
+						dest.flush();
+						std::cout << "Successfully generated LLVM IR at: " << llPath << "\n";
+
+						std::string command = "clang " + llPath + " -o " + exePath + " -lm";
+						int compileResult = std::system(command.c_str());
+
+						if (compileResult == 0) {
+							std::cout << "Successfully compiled executable to: " << exePath << "\n";
+						} else {
+							std::cerr << "Error: Clang failed to compile the generated LLVM module.\n";
+						}
+					}
+				} else {
+					std::cerr << "Error: Generated LLVM module failed verification for file: " << path << "\n";
+				}
 			}
 		}
 };

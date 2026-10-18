@@ -7,8 +7,8 @@
 #define PARSER_H 
 
 // Custom
-#include "Parser/Ast.hpp"
-#include "Token/TokenType.hpp"
+#include "../Parser/Ast.hpp"
+#include "../Token/TokenType.hpp"
 // Library
 #include <cstddef>
 #include <string>

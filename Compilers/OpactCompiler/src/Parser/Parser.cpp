@@ -1,7 +1,7 @@
 #include "CompilerPipeline.hpp"
-#include "Parser/Parser.hpp"
-#include "Parser/Ast.hpp"
-#include "Token/TokenType.hpp"
+#include "../Parser/Parser.hpp"
+#include "../Parser/Ast.hpp"
+#include "../Token/TokenType.hpp"
 #include <exception>
 #include <iostream>
 #include <memory>

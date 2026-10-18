@@ -1,9 +1,9 @@
 #include "TypeChecker.hpp"
 #include "../Parser/Ast.hpp"
-#include "Parser/CompilerPipeline.hpp"
-#include "TypeChecker/Symbol/StructSymbol.hpp"
-#include "TypeChecker/Symbol/VarSymbol.hpp"
-#include "TypeChecker/Types/StructType.hpp"
+#include "../Parser/CompilerPipeline.hpp"
+#include "Symbol/StructSymbol.hpp"
+#include "Symbol/VarSymbol.hpp"
+#include "Types/StructType.hpp"
 #include <algorithm>
 #include <iostream>
 #include <utility>
