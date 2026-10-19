@@ -21,6 +21,8 @@
 #include <thread>
 #include <atomic>
 #include <filesystem>
+#include <functional>
+#include <cstdio>
 #include <condition_variable>
 
 namespace fs = std::filesystem;
@@ -45,19 +47,19 @@ class CompilerPipeline {
 	public:
 		std::atomic<int> nbtokens{0};
 
-		// Accepts imported path and optional parent file path to resolve relative imports
-		void enqueueFile(const std::string& path, const std::string& parentPath = "") {
+		// Resolves an import path relative to the file that imports it.
+		static std::string resolveImportPath(const std::string& path, const std::string& parentPath = "") {
 			fs::path targetPath(path);
-
-			// Resolve path relative to the directory of the parent file
 			if (!parentPath.empty() && targetPath.is_relative()) {
 				fs::path parentDir = fs::path(parentPath).parent_path();
-				targetPath = (parentDir / targetPath).lexically_normal();
-			} else {
-				targetPath = targetPath.lexically_normal();
+				return (parentDir / targetPath).lexically_normal().string();
 			}
+			return targetPath.lexically_normal().string();
+		}
 
-			std::string canonicalString = targetPath.string();
+		// Accepts imported path and optional parent file path to resolve relative imports
+		void enqueueFile(const std::string& path, const std::string& parentPath = "") {
+			std::string canonicalString = resolveImportPath(path, parentPath);
 
 			{
 				std::lock_guard<std::mutex> lock(this->queueMutex);
@@ -154,49 +156,91 @@ class CompilerPipeline {
 		}
 
 		void runTypeCheckingPass() {
+			struct Built { std::string llPath; bool hasMain = false; };
+			std::unordered_map<std::string, Built> built;
+
+			// 1) Type check + generate one .ll file per module.
 			for (auto& [path, module] : parsedModules) {
 				if (!module.astRoot) continue;
+
 				TypeChecker t(this, path);
 				t.initialize(module.astRoot);
 
 				llvm::LLVMContext llvmContext;
-				CodeGenerator codegen("my_module", llvmContext);
+				CodeGenerator codegen(path, llvmContext);
 
-				if (module.astRoot) {
-					module.astRoot->accept(codegen);
+				// Make the public functions of imported modules callable.
+				for (const auto& imp : module.modulePath) {
+					const Module* dep = getModuleByPath(resolveImportPath(imp, path));
+					if (dep && dep->astRoot) codegen.declareImportedFunctions(dep->astRoot.get());
 				}
 
-				if (!llvm::verifyModule(*codegen.getModule(), &llvm::errs())) {
-					std::string outputPath = path;
-					size_t dotPos = outputPath.find_last_of('.');
-					if (dotPos != std::string::npos) {
-						outputPath = outputPath.substr(0, dotPos);
-					}
-					std::string llPath = outputPath + ".ll";
-					std::string exePath = outputPath + ".x";
+				module.astRoot->accept(codegen);
 
-					std::error_code ec;
-					llvm::raw_fd_ostream dest(llPath, ec);
-					if (ec) {
-						std::cerr << "Could not open output file for LLVM IR: " << ec.message() << "\n";
-					} else {
-						codegen.getModule()->print(dest, nullptr);
-						dest.flush();
-						std::cout << "Successfully generated LLVM IR at: " << llPath << "\n";
-
-						std::string command = "clang " + llPath + " -o " + exePath + " -lm";
-						int compileResult = std::system(command.c_str());
-
-						if (compileResult == 0) {
-							std::cout << "Successfully compiled executable to: " << exePath << "\n";
-						} else {
-							std::cerr << "Error: Clang failed to compile the generated LLVM module.\n";
-						}
-					}
-				} else {
+				if (codegen.hasErrors()) {
+					std::cerr << "Error: code generation failed for file: " << path << "\n";
+					continue;
+				}
+				if (llvm::verifyModule(*codegen.getModule(), &llvm::errs())) {
 					std::cerr << "Error: Generated LLVM module failed verification for file: " << path << "\n";
+					continue;
 				}
+
+				std::string base = path;
+				size_t dotPos = base.find_last_of('.');
+				if (dotPos != std::string::npos) base = base.substr(0, dotPos);
+				std::string llPath = base + ".ll";
+
+				std::error_code ec;
+				llvm::raw_fd_ostream dest(llPath, ec);
+				if (ec) {
+					std::cerr << "Could not open output file for LLVM IR: " << ec.message() << "\n";
+					continue;
+				}
+				codegen.getModule()->print(dest, nullptr);
+				dest.flush();
+
+				llvm::Function* mainFn = codegen.getModule()->getFunction("main");
+				built[path] = { llPath, mainFn && !mainFn->isDeclaration() };
 			}
+
+			// 2) Link: every module that defines Main becomes an executable,
+			//    together with all the modules it (transitively) imports.
+			for (auto& [path, b] : built) {
+				if (!b.hasMain) continue;
+
+				std::vector<std::string> files;
+				std::unordered_set<std::string> seen;
+				bool complete = true;
+
+				std::function<void(const std::string&)> collect = [&](const std::string& p) {
+					if (!seen.insert(p).second) return;
+					auto it = built.find(p);
+					if (it == built.end()) { complete = false; return; }
+					files.push_back(it->second.llPath);
+					for (const auto& imp : parsedModules.at(p).modulePath)
+						collect(resolveImportPath(imp, p));
+				};
+				collect(path);
+
+				if (!complete) {
+					std::cerr << "Error: cannot link '" << path << "': an imported module failed to compile.\n";
+					continue;
+				}
+
+				std::string exePath = path.substr(0, path.find_last_of('.')) + ".x";
+				std::string command = "clang -Wno-override-module";
+				for (const auto& f : files) command += " \"" + f + "\"";
+				command += " -o \"" + exePath + "\" -lm";
+
+				if (std::system(command.c_str()) == 0)
+					std::cout << "Successfully compiled executable to: " << exePath << "\n";
+				else
+					std::cerr << "Error: Clang failed to compile the generated LLVM modules.\n";
+			}
+
+			// 3) Clean up the intermediate .ll files.
+			for (auto& [path, b] : built) std::remove(b.llPath.c_str());
 		}
 };
 

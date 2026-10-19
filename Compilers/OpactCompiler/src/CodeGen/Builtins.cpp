@@ -1,41 +1,22 @@
-//==========================================================================//
-//  Builtins.cpp  -  BUILT-IN FUNCTIONS                                     //
-//                                                                          //
-//  Everything the language provides "for free" lives here:                 //
-//    1. registerBuiltins()  <<< ADD YOUR BUILTINS HERE >>>                 //
-//    2. Registration API    (registerBuiltin / registerExternal)           //
-//    3. Printf / Println    (format string handling)                       //
-//==========================================================================//
 #include "CodeGenerator.hpp"
 
-//==========================================================================//
-//  1. The builtin list  -  ADD YOUR BUILTINS HERE                          //
-//==========================================================================//
 void CodeGenerator::registerBuiltins() {
 	llvm::Type* i32 = builder.getInt32Ty();
 	llvm::Type* ptr = builder.getPtrTy();
 	llvm::Type* voidTy = builder.getVoidTy();
 
-	// A) Custom builtins: full control over the emitted IR.
 	registerBuiltin("Printf",  [this](CallExpr& c) { return emitFormatted(c, /*newline=*/false); });
 	registerBuiltin("Println", [this](CallExpr& c) { return emitFormatted(c, /*newline=*/true);  });
 
-	// B) Thin wrappers over C library functions: ONE line each.
-	//                  user name, C name, return, params,   variadic
 	registerExternal("Exit", "exit", voidTy, { i32 });
 	registerExternal("Puts", "puts", i32,    { ptr });
 	registerExternal("Abs",  "abs",  i32,    { i32 });
 }
 
-//==========================================================================//
-//  2. Registration API                                                     //
-//==========================================================================//
 void CodeGenerator::registerBuiltin(const std::string& name, BuiltinHandler handler) {
 	builtins[name] = std::move(handler);
 }
 
-// Declares the C function lazily (only when first used) and coerces the
-// arguments to the declared parameter types.
 void CodeGenerator::registerExternal(const std::string& userName, const std::string& cName,
                                      llvm::Type* ret, std::vector<llvm::Type*> params, bool variadic) {
 	registerBuiltin(userName, [this, userName, cName, ret, params, variadic](CallExpr& call) -> llvm::Value* {
@@ -66,7 +47,6 @@ void CodeGenerator::registerExternal(const std::string& userName, const std::str
 //  3. Printf / Println                                                     //
 //==========================================================================//
 
-// Parses `src` as a single expression using the normal Lexer + Parser.
 ExprPtr CodeGenerator::parseInlineExpression(const std::string& src) {
 	try {
 		Lexer lexer(src);
@@ -78,7 +58,6 @@ ExprPtr CodeGenerator::parseInlineExpression(const std::string& src) {
 	}
 }
 
-// Picks the printf specifier from the LLVM type and adjusts the value for varargs.
 bool CodeGenerator::appendFormatArg(llvm::Value*& v, std::string& fmt) {
 	llvm::Type* t = v->getType();
 	if (t->isIntegerTy(1)) {            // bool -> "true"/"false"
@@ -96,7 +75,6 @@ bool CodeGenerator::appendFormatArg(llvm::Value*& v, std::string& fmt) {
 	return false;
 }
 
-// Printf("x = {x}, sum = {a + b}, positional = {}\n", extraArg)
 llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 	using namespace codegen_detail;
 
@@ -159,14 +137,11 @@ llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 	if (nextPositional < call.arguments.size())
 		std::cerr << "Codegen Warning: Printf has unused extra arguments\n";
 
-	// Declare printf with a pointer type matching your LLVM context
 	llvm::Type* charPtrTy = builder.getPtrTy();
 	auto printfFn = module->getOrInsertFunction("printf",
 		llvm::FunctionType::get(builder.getInt32Ty(), { charPtrTy }, true));
 
-	// Global string, already returned as a plain pointer to the first char.
-	// (Opaque pointers have no element type, so no GEP / getContainedType needed.)
-	llvm::Value* formatPtr = builder.CreateGlobalStringPtr(fmt, "fmt");
+	llvm::Value* formatPtr = builder.CreateGlobalString(fmt, "fmt");
 
 	args.insert(args.begin(), formatPtr);
 	return builder.CreateCall(printfFn, args, "printf_ret");

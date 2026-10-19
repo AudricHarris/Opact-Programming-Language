@@ -239,8 +239,21 @@ llvm::Function* CodeGenerator::declareFunction(FunctionDeclExpr& node) {
 		params.push_back(pt);
 	}
 
+	// Only `public` functions (and main) are visible to other modules;
+	// everything else gets internal linkage so it cannot be linked from outside.
+	auto linkage = (name == "main" || node.isPublic) ? llvm::Function::ExternalLinkage
+	                                                 : llvm::Function::InternalLinkage;
 	auto* fnType = llvm::FunctionType::get(ret, params, false);
-	return llvm::Function::Create(fnType, llvm::Function::ExternalLinkage, name, module.get());
+	return llvm::Function::Create(fnType, linkage, name, module.get());
+}
+
+void CodeGenerator::declareImportedFunctions(Expression* moduleRoot) {
+	auto* block = dynamic_cast<Block*>(moduleRoot);
+	if (!block) return;
+	for (auto& e : block->expressions) {
+		auto* f = dynamic_cast<FunctionDeclExpr*>(e.get());
+		if (f && f->isPublic) declareFunction(*f); // declaration only, body lives in the other module
+	}
 }
 
 void CodeGenerator::emitDefaultReturn() {

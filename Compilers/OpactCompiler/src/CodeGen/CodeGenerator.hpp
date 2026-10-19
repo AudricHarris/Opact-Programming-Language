@@ -101,6 +101,10 @@ public:
 	                      llvm::Type* ret, std::vector<llvm::Type*> params,
 	                      bool variadic = false);
 
+	// Declares the PUBLIC functions of an imported module as external
+	// functions so this module can call them. Call before visiting your AST.
+	void declareImportedFunctions(Expression* moduleRoot);
+
 	//----------------------------------------------------------------------//
 	//  Visitors                                            [CodeGenerator.cpp] //
 	//----------------------------------------------------------------------//
