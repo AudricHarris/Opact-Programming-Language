@@ -91,7 +91,7 @@ public:
 private:
 	void registerBuiltins() {
 		llvm::Type* i32 = builder.getInt32Ty();
-		llvm::Type* ptr = llvm::PointerType::get(context, 0);
+		llvm::Type* ptr = llvm::PointerType::get(builder.getInt8Ty(), 0);
 		llvm::Type* voidTy = builder.getVoidTy();
 
 		// 1) Custom builtins: full control over the emitted IR.
@@ -113,28 +113,28 @@ public:
 	// Declares the C function lazily (only when first used) and coerces the
 	// arguments to the declared parameter types.
 	void registerExternal(const std::string& userName, const std::string& cName,
-	                      llvm::Type* ret, std::vector<llvm::Type*> params, bool variadic = false) {
+			llvm::Type* ret, std::vector<llvm::Type*> params, bool variadic = false) {
 		registerBuiltin(userName, [this, userName, cName, ret, params, variadic](CallExpr& call) -> llvm::Value* {
-			bool badCount = variadic ? call.arguments.size() < params.size()
-			                         : call.arguments.size() != params.size();
-			if (badCount) {
+				bool badCount = variadic ? call.arguments.size() < params.size()
+				: call.arguments.size() != params.size();
+				if (badCount) {
 				error(userName + ": expected " + std::to_string(params.size()) + " argument(s), got " +
-				      std::to_string(call.arguments.size()));
+						std::to_string(call.arguments.size()));
 				return nullptr;
-			}
+				}
 
-			auto callee = module->getOrInsertFunction(cName, llvm::FunctionType::get(ret, params, variadic));
+				auto callee = module->getOrInsertFunction(cName, llvm::FunctionType::get(ret, params, variadic));
 
-			std::vector<llvm::Value*> args;
-			for (size_t i = 0; i < call.arguments.size(); ++i) {
+				std::vector<llvm::Value*> args;
+				for (size_t i = 0; i < call.arguments.size(); ++i) {
 				llvm::Value* v = emit(call.arguments[i].get());
 				if (!v) return nullptr;
 				v = (i < params.size()) ? coerce(v, params[i]) : promoteVarArg(v);
 				if (!v) return nullptr;
 				args.push_back(v);
-			}
-			if (ret->isVoidTy()) return builder.CreateCall(callee, args);
-			return builder.CreateCall(callee, args, "calltmp");
+				}
+				if (ret->isVoidTy()) return builder.CreateCall(callee, args);
+				return builder.CreateCall(callee, args, "calltmp");
 		});
 	}
 
@@ -148,14 +148,14 @@ private:
 			case DataType::Float: return builder.getDoubleTy();
 			case DataType::Bool:  return builder.getInt1Ty();
 			case DataType::Char:  return builder.getInt8Ty();
-			case DataType::Str:   return llvm::PointerType::get(context, 0);
+			case DataType::Str:   return llvm::PointerType::get(builder.getInt8Ty(), 0);
 			case DataType::Void:  return builder.getVoidTy();
 			case DataType::Custom: {
-				auto it = structs.find(d.customTypeName);
-				if (it != structs.end()) return it->second.type;
-				error("Unknown type '" + d.customTypeName + "'");
-				return nullptr;
-			}
+									   auto it = structs.find(d.customTypeName);
+									   if (it != structs.end()) return it->second.type;
+									   error("Unknown type '" + d.customTypeName + "'");
+									   return nullptr;
+								   }
 		}
 		return nullptr;
 	}
@@ -171,7 +171,7 @@ private:
 	}
 
 	// Converts v to type `to` (int widths, int<->float, float widths, ->bool).
-	llvm::Value* coerce(llvm::Value* v, llvm::Type* to) {
+llvm::Value* coerce(llvm::Value* v, llvm::Type* to) {
 		if (!v || !to) return nullptr;
 		llvm::Type* from = v->getType();
 		if (from == to) return v;
@@ -190,6 +190,17 @@ private:
 		if (from->isFloatingPointTy() && to->isFloatingPointTy())
 			return from->getPrimitiveSizeInBits() < to->getPrimitiveSizeInBits()
 				? builder.CreateFPExt(v, to, "fpext") : builder.CreateFPTrunc(v, to, "fptrunc");
+
+		// >>> ADD THIS BLOCK TO HANDLE POINTER / STRING LITERAL COERCION <<<
+		if (from->isPointerTy() && to->isPointerTy()) {
+			// If it's an array pointer ([N x i8]* -> i8*), get pointer to first element
+			if (auto* ptrType = llvm::dyn_cast<llvm::PointerType>(from)) {
+				// Check if the underlying type is an array (e.g. string literals)
+				// Or use a direct pointer cast / GEP decay
+			}
+			return builder.CreatePointerCast(v, to, "ptrcast");
+		}
+		// =================================================================
 
 		error("Cannot convert between these types");
 		return nullptr;
@@ -225,7 +236,7 @@ private:
 		if (t->isIntegerTy(1)) {            // bool -> "true"/"false"
 			fmt += "%s";
 			v = builder.CreateSelect(v, builder.CreateGlobalString("true"),
-			                            builder.CreateGlobalString("false"), "boolstr");
+					builder.CreateGlobalString("false"), "boolstr");
 			return true;
 		}
 		if (t->isIntegerTy(8))  { fmt += "%c";   v = coerce(v, builder.getInt32Ty()); return true; }
@@ -300,10 +311,26 @@ private:
 		if (nextPositional < call.arguments.size())
 			std::cerr << "Codegen Warning: Printf has unused extra arguments\n";
 
+		// Declare printf with a pointer type matching your LLVM context
+		llvm::Type* charPtrTy = llvm::PointerType::get(builder.getInt8Ty(), 0);
 		auto printfFn = module->getOrInsertFunction("printf",
-			llvm::FunctionType::get(builder.getInt32Ty(), { llvm::PointerType::get(context, 0) }, true));
+				llvm::FunctionType::get(builder.getInt32Ty(), { charPtrTy }, true));
 
-		args.insert(args.begin(), builder.CreateGlobalString(fmt, "fmt"));
+		// Create the global string array
+		llvm::Value* formatStr = builder.CreateGlobalString(fmt, "fmt");
+
+		// Get the pointer to the first element (decays [N x i8]* to a pointer)
+		llvm::Value* formatPtr = builder.CreateInBoundsGEP(
+				formatStr->getType()->getContainedType(0),
+				formatStr,
+				{ builder.getInt32(0), builder.getInt32(0) },
+				"fmt_ptr"
+				);
+
+		// Ensure the pointer type matches what the builder / module expects (fixes typed vs opaque mismatch)
+		llvm::Value* castedFormatPtr = builder.CreatePointerCast(formatPtr, charPtrTy, "fmt_cast");
+
+		args.insert(args.begin(), castedFormatPtr);
 		return builder.CreateCall(printfFn, args, "printf_ret");
 	}
 
@@ -397,20 +424,38 @@ private:
 	}
 
 	llvm::Value* emitBinary(BinaryOp op, llvm::Value* l, llvm::Value* r) {
-		// Logical (not short-circuiting yet)
 		if (op == BinaryOp::And) return builder.CreateAnd(toBool(l), toBool(r), "andtmp");
 		if (op == BinaryOp::Or)  return builder.CreateOr(toBool(l),  toBool(r), "ortmp");
 
-		if (!unify(l, r)) return nullptr;
-		llvm::Type* t = l->getType();
-		bool fp = t->isFloatingPointTy();
-		if (!fp && !t->isIntegerTy()) {
-			// pointers (str): only == and != make sense
-			if (op == BinaryOp::Eq) return builder.CreateICmpEQ(l, r, "cmptmp");
-			if (op == BinaryOp::Ne) return builder.CreateICmpNE(l, r, "cmptmp");
-			error("Unsupported operand type for binary operator");
-			return nullptr;
+		llvm::Type* lt = l->getType();
+		llvm::Type* rt = r->getType();
+
+		// Handle string/pointer concatenation BEFORE unify so different pointer types don't trigger errors
+		if (op == BinaryOp::Add && !lt->isFloatingPointTy() && !lt->isIntegerTy() && !rt->isFloatingPointTy() && !rt->isIntegerTy()) {
+			auto charPtrTy = llvm::PointerType::get(builder.getInt8Ty(), 0);
+			auto sizeTy = builder.getInt64Ty();
+			auto strlenFn = module->getOrInsertFunction("strlen", llvm::FunctionType::get(sizeTy, { charPtrTy }, false));
+			auto mallocFn = module->getOrInsertFunction("malloc", llvm::FunctionType::get(charPtrTy, { sizeTy }, false));
+			auto memcpyFn = module->getOrInsertFunction("memcpy", llvm::FunctionType::get(charPtrTy, { charPtrTy, charPtrTy, sizeTy }, false));
+			llvm::Value* str1 = builder.CreatePointerCast(l, charPtrTy, "str1");
+			llvm::Value* str2 = builder.CreatePointerCast(r, charPtrTy, "str2");
+			llvm::Value* len1 = builder.CreateCall(strlenFn, { str1 }, "len1");
+			llvm::Value* len2 = builder.CreateCall(strlenFn, { str2 }, "len2");
+			llvm::Value* totalLen = builder.CreateAdd(
+				builder.CreateAdd(len1, len2, "addlen"), 
+				llvm::ConstantInt::get(sizeTy, 1), 
+				"totallen"
+			);
+			llvm::Value* dest = builder.CreateCall(mallocFn, { totalLen }, "dest");
+			builder.CreateCall(memcpyFn, { dest, str1, len1 });
+			llvm::Value* destOffset = builder.CreateInBoundsGEP(builder.getInt8Ty(), dest, { len1 }, "dest_offset");
+			llvm::Value* len2Plus1 = builder.CreateAdd(len2, llvm::ConstantInt::get(sizeTy, 1), "len2_plus_1");
+			builder.CreateCall(memcpyFn, { destOffset, str2, len2Plus1 });
+			return dest;
 		}
+
+		if (!unify(l, r)) return nullptr;
+		bool fp = lt->isFloatingPointTy();
 
 		switch (op) {
 			case BinaryOp::Add: return fp ? builder.CreateFAdd(l, r, "addtmp") : builder.CreateAdd(l, r, "addtmp");
@@ -424,7 +469,7 @@ private:
 				llvm::Value* res = builder.CreateIntrinsic(llvm::Intrinsic::pow, { d },
 				                                           { coerce(l, d), coerce(r, d) }, nullptr, "powtmp");
 				std::cout << "Got Power\n";
-				return fp ? res : coerce(res, t);
+				return fp ? res : coerce(res, lt);
 			}
 
 			case BinaryOp::BitAnd:
@@ -481,44 +526,44 @@ public:
 
 		switch (node.kind) {
 			case LiteralKind::Int: {
-				text.erase(std::remove(text.begin(), text.end(), '_'), text.end());
-				int base = 10;
-				size_t skip = 0;
-				switch (node.base) {
-					case NumericBase::Hexadecimal: base = 16; skip = 2; break;
-					case NumericBase::Octal:       base = 8;  skip = 2; break;
-					case NumericBase::Binary:      base = 2;  skip = 2; break;
-					default: break;
-				}
-				try {
-					unsigned long long v = std::stoull(text.substr(skip), nullptr, base);
-					llvm::Type* ty = (v > 0x7FFFFFFFULL) ? builder.getInt64Ty() : builder.getInt32Ty();
-					lastValue = llvm::ConstantInt::get(ty, v, false);
-				} catch (...) {
-					error("Invalid integer literal '" + text + "'");
-					lastValue = nullptr;
-				}
-				break;
-			}
+									   text.erase(std::remove(text.begin(), text.end(), '_'), text.end());
+									   int base = 10;
+									   size_t skip = 0;
+									   switch (node.base) {
+										   case NumericBase::Hexadecimal: base = 16; skip = 2; break;
+										   case NumericBase::Octal:       base = 8;  skip = 2; break;
+										   case NumericBase::Binary:      base = 2;  skip = 2; break;
+										   default: break;
+									   }
+									   try {
+										   unsigned long long v = std::stoull(text.substr(skip), nullptr, base);
+										   llvm::Type* ty = (v > 0x7FFFFFFFULL) ? builder.getInt64Ty() : builder.getInt32Ty();
+										   lastValue = llvm::ConstantInt::get(ty, v, false);
+									   } catch (...) {
+										   error("Invalid integer literal '" + text + "'");
+										   lastValue = nullptr;
+									   }
+									   break;
+								   }
 			case LiteralKind::Float:
-				try {
-					lastValue = llvm::ConstantFP::get(builder.getDoubleTy(), std::stod(text));
-				} catch (...) {
-					error("Invalid float literal '" + text + "'");
-					lastValue = nullptr;
-				}
-				break;
+								   try {
+									   lastValue = llvm::ConstantFP::get(builder.getDoubleTy(), std::stod(text));
+								   } catch (...) {
+									   error("Invalid float literal '" + text + "'");
+									   lastValue = nullptr;
+								   }
+								   break;
 			case LiteralKind::Bool:
-				lastValue = builder.getInt1(text == "true");
-				break;
+								   lastValue = builder.getInt1(text == "true");
+								   break;
 			case LiteralKind::Char: {
-				std::string c = unescape(stripQuotes(text));
-				lastValue = builder.getInt8(c.empty() ? 0 : static_cast<uint8_t>(c[0]));
-				break;
-			}
+										std::string c = unescape(stripQuotes(text));
+										lastValue = builder.getInt8(c.empty() ? 0 : static_cast<uint8_t>(c[0]));
+										break;
+									}
 			case LiteralKind::Str:
-				lastValue = builder.CreateGlobalString(unescape(stripQuotes(text)), "str");
-				break;
+									lastValue = builder.CreateGlobalString(unescape(stripQuotes(text)), "str");
+									break;
 		}
 	}
 
@@ -598,7 +643,7 @@ public:
 
 		if (node.op == UnaryOp::Negate) {
 			lastValue = v->getType()->isFloatingPointTy() ? builder.CreateFNeg(v, "negtmp")
-			                                              : builder.CreateNeg(v, "negtmp");
+				: builder.CreateNeg(v, "negtmp");
 		} else {
 			lastValue = builder.CreateNot(toBool(v), "nottmp");
 		}
@@ -784,7 +829,7 @@ public:
 		if (callee) {
 			if (callee->arg_size() != node.arguments.size()) {
 				error("Function '" + id->name + "' expects " + std::to_string(callee->arg_size()) +
-				      " argument(s), got " + std::to_string(node.arguments.size()));
+						" argument(s), got " + std::to_string(node.arguments.size()));
 				return;
 			}
 			std::vector<llvm::Value*> args;
@@ -795,7 +840,7 @@ public:
 				args.push_back(v);
 			}
 			lastValue = callee->getReturnType()->isVoidTy() ? builder.CreateCall(callee, args)
-			                                                : builder.CreateCall(callee, args, "calltmp");
+				: builder.CreateCall(callee, args, "calltmp");
 			return;
 		}
 
