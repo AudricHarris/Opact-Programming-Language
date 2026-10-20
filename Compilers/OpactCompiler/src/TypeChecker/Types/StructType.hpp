@@ -1,7 +1,6 @@
 #pragma once
 #include <memory>
 #include <string>
-#include <vector>
 #include <unordered_map>
 #include "Type.hpp"
 
@@ -34,7 +33,11 @@ class StructType : public Type {
 			if (!other || other->getKind() != TypeKind::Struct) return false;
 			return name_ == static_cast<const StructType*>(other)->name_;
 		}
-
+		
+		void setSize(int size)
+		{
+			this->size_ = size;
+		}
 	private:
 		std::string name_;
 		std::unordered_map<std::string, StructField> fields_;

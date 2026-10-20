@@ -1,6 +1,6 @@
 #pragma once
+#include <cstddef>
 #include <string>
-#include <memory>
 
 enum class TypeKind {
 	Primitive,
@@ -14,4 +14,8 @@ class Type {
 		virtual TypeKind getKind() const = 0;
 		virtual std::string toString() const = 0;
 		virtual bool equals(const Type* other) const = 0;
+
+		size_t getSize() const { return size_; }
+	protected:
+		size_t size_ = 0;
 };

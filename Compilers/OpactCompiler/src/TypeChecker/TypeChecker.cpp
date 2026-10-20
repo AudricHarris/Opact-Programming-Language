@@ -88,6 +88,7 @@ void TypeChecker::reportError(const std::string& message) {
 // ---------- Type conversion helpers ----------
 
 std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
+	scopeManager.dump();
 	switch (d.type) {
 		case DataType::Int:   return prim(BuiltinType::Int);
 		case DataType::Float: return prim(BuiltinType::Float);
@@ -99,7 +100,8 @@ std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
 								   std::string name = d.customTypeName;
 								   if (name.empty() && d.customName) name = tokenText(*d.customName);
 								   auto sym = scopeManager.lookup(name);
-								   if (!sym || sym->getKind() != SymbolKind::Class) {
+								   
+								   if (!sym || sym->getKind() != SymbolKind::Struct) {
 									   reportError("Unknown type: " + name);
 									   return prim(BuiltinType::Void);
 								   }
@@ -157,10 +159,19 @@ std::shared_ptr<FunctionType> TypeChecker::buildFunctionType(const FunctionDeclE
 std::shared_ptr<StructType> TypeChecker::buildStructureType(const StructDeclExpr& structures) {
 	auto structure = std::make_shared<StructType>(structures.name);
 
-	for ( const auto& att : structures.attributes)
-	{
-		std::cout << att.name << "\n";
+	size_t currentOffset = 0;
+
+	for (const auto& att : structures.attributes) {
+		std::shared_ptr<Type> fieldType = fromDesc(att.type);
+
+		size_t fieldOffset = currentOffset;
+		std::cout << "Field: " << att.name << " at offset: " << fieldOffset << "\n";
+
+		currentOffset += fieldType->getSize();
+
 	}
+	
+	structure->setSize(currentOffset);
 
 	return structure;
 }

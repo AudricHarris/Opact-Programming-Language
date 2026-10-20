@@ -12,7 +12,21 @@ enum class BuiltinType {
 
 class PrimitiveType : public Type {
 	public:
-		explicit PrimitiveType(BuiltinType type) : type_(type) {}
+		explicit PrimitiveType(BuiltinType type) : type_(type) {
+			switch (type_) {
+				case BuiltinType::Bool:  size_ = 1; break;
+				case BuiltinType::Char:  size_ = 1; break;
+				case BuiltinType::Int:   size_ = 4; break;
+				case BuiltinType::Float: size_ = 4; break;
+				case BuiltinType::Str:   size_ = 8; break;
+				case BuiltinType::Void:  size_ = 0; break;
+			}
+		}
+
+		// this is for i16 i32 i64
+		PrimitiveType(BuiltinType type, size_t customSize) : type_(type) {
+			size_ = customSize;
+		}
 
 		TypeKind getKind() const override { return TypeKind::Primitive; }
 		BuiltinType getBuiltinType() const { return type_; }
