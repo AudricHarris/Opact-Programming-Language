@@ -286,7 +286,6 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 		ptype.customTypeName = ptypeTok.getWord();
 		
 		this->consume(); // Point virgule
-		std::cout <<"Parser step struct :"<< pnameTok.getWord() << "\n";
 		fields.emplace_back(pnameTok.getWord(), std::move(ptype), isMut, std::move(defaultVal));
 	}
 	while (!this->match(TokenKind::RBRACE));

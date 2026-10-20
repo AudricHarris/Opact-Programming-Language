@@ -40,6 +40,7 @@ public:
 	void visit(FunctionDeclExpr& node) override;
 	void visit(StructDeclExpr& node) override;
 	void visit(StructCreateExpr& node) override;
+	void visit(MemberAccessExpr& node) override;
 	void visit(CallExpr& node) override;
 	void visit(ReturnExpr& node) override;
 	void visit(ImportExpr& node) override;
@@ -51,7 +52,6 @@ public:
 	void visit(CastExpr& node) override {}
 	void visit(AssignExpr& node) override {}
 	void visit(LoopExpr& node) override {}
-	void visit(MemberAccessExpr& node) override {}
 	void visit(ArrayIndexExpr& node) override {}
 	void visit(ArrayLiteralExpr& node) override {}
 	void visit(TupleLiteralExpr& node) override {}

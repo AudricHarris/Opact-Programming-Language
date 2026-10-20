@@ -125,14 +125,14 @@ public:
 	void visit(ReturnExpr& node) override;
 	void visit(FunctionDeclExpr& node) override;
 	void visit(StructDeclExpr& node) override;
+	void visit(StructCreateExpr&) override;
+	void visit(MemberAccessExpr&) override;
 	void visit(CallExpr& node) override;
 	void visit(ImportExpr& node) override;
 
 	// Not implemented yet
 	void visit(BorrowExpr&) override {}
 	void visit(GenericCallExpr&) override {}
-	void visit(StructCreateExpr&) override {}
-	void visit(MemberAccessExpr&) override {}
 	void visit(ArrayIndexExpr&) override {}
 	void visit(ArrayLiteralExpr&) override {}
 	void visit(TupleLiteralExpr&) override {}

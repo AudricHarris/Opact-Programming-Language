@@ -10,6 +10,7 @@
 //  Builtins (Printf, Println, C wrappers) live in Builtins.cpp.            //
 //==========================================================================//
 #include "CodeGenerator.hpp"
+#include <llvm/IR/DerivedTypes.h>
 
 //==========================================================================//
 //  1. Constructor                                                          //
@@ -332,11 +333,19 @@ void CodeGenerator::visit(VarDeclExpr& node) {
 	llvm::Value* init = node.expr ? emit(node.expr.get()) : nullptr;
 	if (node.expr && !init) { lastValue = nullptr; return; }
 
-	// Void here means "no explicit type": infer from the initializer.
 	llvm::Type* ty = (node.type.type == DataType::Void && init) ? init->getType() : mapType(node.type);
 	if (!ty || ty->isVoidTy()) { error("Invalid type for variable '" + name + "'"); return; }
 
-	llvm::Value* initVal = init ? coerce(init, ty) : llvm::Constant::getNullValue(ty);
+	llvm::Value* initVal = nullptr;
+	if (init) {
+		if (ty->isStructTy() && init->getType()->isPointerTy()) {
+			initVal = builder.CreateLoad(ty, init, "structinit");
+		} else {
+			initVal = coerce(init, ty);
+		}
+	} else {
+		initVal = llvm::Constant::getNullValue(ty);
+	}
 	if (!initVal) return;
 
 	llvm::AllocaInst* slot = createEntryAlloca(currentFn, ty, name);
@@ -570,6 +579,88 @@ void CodeGenerator::visit(StructDeclExpr& node) {
 	if (it->second.type->isOpaque()) it->second.type->setBody(fieldTypes);
 }
 
+void CodeGenerator::visit(StructCreateExpr& node) {
+	lastValue = nullptr;
+
+	auto* id = dynamic_cast<IdentifierExpr*>(node.structObj.get());
+	if (!id) {
+		error("Only direct structure creation by name is supported");
+		return;
+	}
+	
+	
+	llvm::StructType* llvmStructTy = llvm::StructType::getTypeByName(module->getContext(), id->name);
+	if (!llvmStructTy) {
+		error("Unknown structure type '" + id->name + "'");
+		return;
+	}
+
+	if (llvmStructTy->getNumElements() != node.arguments.size()) {
+		error("Structure '" + id->name + "' expects " + 
+				std::to_string(llvmStructTy->getNumElements()) + 
+				" argument(s), but got " + std::to_string(node.arguments.size()));
+		return;
+	}
+
+	llvm::AllocaInst* structAlloca = builder.CreateAlloca(llvmStructTy, nullptr, id->name + "_tmp");
+
+	for (size_t i = 0; i < node.arguments.size(); ++i) {
+		llvm::Value* argVal = emit(node.arguments[i].get());
+		if (!argVal) return;
+
+		llvm::Value* fieldPtr = builder.CreateStructGEP(llvmStructTy, structAlloca, i, id->name + "_field_" + std::to_string(i));
+
+		builder.CreateStore(argVal, fieldPtr);
+	}
+
+	lastValue = structAlloca; 
+}
+
+void CodeGenerator::visit(MemberAccessExpr& node) {
+	lastValue = nullptr;
+
+	llvm::Value* objPtr = nullptr;
+	llvm::StructType* structTy = nullptr;
+
+	if (auto* id = dynamic_cast<IdentifierExpr*>(node.object.get())) {
+		VarInfo* var = lookupVar(id->name);
+		if (!var) {
+			error("Undefined variable '" + id->name + "'");
+			return;
+		}
+		objPtr = var->addr;
+		structTy = llvm::dyn_cast<llvm::StructType>(var->type);
+	} else {
+		objPtr = emit(node.object.get());
+	}
+
+	if (!structTy) {
+		error("Member access '.' is only supported on structures");
+		return;
+	}
+
+	std::string structName = structTy->getName().str();
+	auto it = structs.find(structName);
+	if (it == structs.end()) {
+		error("Unknown structure type metadata for '" + structName + "'");
+		return;
+	}
+
+	const auto& fieldNames = it->second.fieldNames;
+	auto fieldIt = std::find(fieldNames.begin(), fieldNames.end(), node.memberName);
+	if (fieldIt == fieldNames.end()) {
+		error("Structure '" + structName + "' has no field named '" + node.memberName + "'");
+		return;
+	}
+
+	int fieldIndex = static_cast<int>(std::distance(fieldNames.begin(), fieldIt));
+
+	llvm::Value* fieldPtr = builder.CreateStructGEP(structTy, objPtr, fieldIndex, node.memberName + "_ptr");
+	llvm::Type* fieldTy = structTy->getElementType(fieldIndex);
+
+	lastValue = builder.CreateLoad(fieldTy, fieldPtr, node.memberName + "_val");
+}
+
 // ----- Calls --------------------------------------------------------------
 void CodeGenerator::visit(CallExpr& node) {
 	lastValue = nullptr;
@@ -581,7 +672,7 @@ void CodeGenerator::visit(CallExpr& node) {
 	if (callee) {
 		if (callee->arg_size() != node.arguments.size()) {
 			error("Function '" + id->name + "' expects " + std::to_string(callee->arg_size()) +
-			      " argument(s), got " + std::to_string(node.arguments.size()));
+					" argument(s), got " + std::to_string(node.arguments.size()));
 			return;
 		}
 		std::vector<llvm::Value*> args;
@@ -592,7 +683,7 @@ void CodeGenerator::visit(CallExpr& node) {
 			args.push_back(v);
 		}
 		lastValue = callee->getReturnType()->isVoidTy() ? builder.CreateCall(callee, args)
-		                                                : builder.CreateCall(callee, args, "calltmp");
+			: builder.CreateCall(callee, args, "calltmp");
 		return;
 	}
 

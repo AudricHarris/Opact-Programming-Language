@@ -164,7 +164,6 @@ std::shared_ptr<StructType> TypeChecker::buildStructureType(const StructDeclExpr
 		std::shared_ptr<Type> fieldType = fromDesc(att.type);
 
 		size_t fieldOffset = currentOffset;
-		std::cout << "Field: " << att.name << " at offset: " << fieldOffset << "\n";
 
 		structure->addField(att.name, fieldType, fieldOffset); // <-- Register the field here!
 
@@ -281,6 +280,32 @@ void TypeChecker::visit(StructCreateExpr& node)
 	}
 
 	currentType = structType; // Evaluates to the instance type of the structure
+}
+
+void TypeChecker::visit(MemberAccessExpr &node)
+{
+	if (!node.object) { 
+		currentType = prim(BuiltinType::Void); 
+		return; 
+	}
+
+	auto baseType = typeOf(*node.object);
+	if (baseType->getKind() != TypeKind::Struct) {
+		reportError("Member access '.' applied to non-structure type");
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto* strct = static_cast<StructType*>(baseType.get());
+	const auto* field = strct->getField(node.memberName); // Assuming node.memberName holds the field string
+
+	if (!field) {
+		reportError("Structure '" + strct->getName() + "' has no member named '" + node.memberName + "'");
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	currentType = field->type;
 }
 
 void TypeChecker::visit(CallExpr& node) {
