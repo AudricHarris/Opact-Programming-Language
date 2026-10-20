@@ -88,7 +88,6 @@ void TypeChecker::reportError(const std::string& message) {
 // ---------- Type conversion helpers ----------
 
 std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
-	scopeManager.dump();
 	switch (d.type) {
 		case DataType::Int:   return prim(BuiltinType::Int);
 		case DataType::Float: return prim(BuiltinType::Float);
@@ -167,10 +166,11 @@ std::shared_ptr<StructType> TypeChecker::buildStructureType(const StructDeclExpr
 		size_t fieldOffset = currentOffset;
 		std::cout << "Field: " << att.name << " at offset: " << fieldOffset << "\n";
 
-		currentOffset += fieldType->getSize();
+		structure->addField(att.name, fieldType, fieldOffset); // <-- Register the field here!
 
+		currentOffset += fieldType->getSize();
 	}
-	
+
 	structure->setSize(currentOffset);
 
 	return structure;
@@ -232,6 +232,8 @@ void TypeChecker::visit(FunctionDeclExpr& node) {
 	currentType = prim(BuiltinType::Void);
 }
 
+
+// Structure
 void TypeChecker::visit(StructDeclExpr& node) {
 	if (!declaredStructures_.count(&node)) declareStructures(node);
 
@@ -245,6 +247,40 @@ void TypeChecker::visit(StructDeclExpr& node) {
 
 	scopeManager.exitScope();
 	currentType = prim(BuiltinType::Void);
+}
+
+void TypeChecker::visit(StructCreateExpr& node)
+{
+	if (!node.structObj) { currentType = prim(BuiltinType::Void); return; }
+
+	auto structType = typeOf(*node.structObj);
+	std::vector<std::shared_ptr<Type>> argTypes;
+	for (auto& arg : node.arguments) {
+		if (arg) argTypes.push_back(typeOf(*arg));
+	}
+
+	if (structType->getKind() != TypeKind::Struct) {
+		reportError("Called expression is not a structure");
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto* strct = static_cast<StructType*>(structType.get());
+	const auto& fields = strct->getOrderedFields(); // Uses declaration order
+
+	if (fields.size() != argTypes.size()) {
+		reportError("Expected " + std::to_string(fields.size()) + " argument(s) but got " +
+				std::to_string(argTypes.size()));
+	} else {
+		for (size_t i = 0; i < fields.size(); ++i) {
+			if (!fields[i].type->equals(argTypes[i].get())) {
+				reportError("Argument " + std::to_string(i + 1) + " ('" + fields[i].name + "'): expected " +
+						fields[i].type->toString() + " but got " + argTypes[i]->toString());
+			}
+		}
+	}
+
+	currentType = structType; // Evaluates to the instance type of the structure
 }
 
 void TypeChecker::visit(CallExpr& node) {

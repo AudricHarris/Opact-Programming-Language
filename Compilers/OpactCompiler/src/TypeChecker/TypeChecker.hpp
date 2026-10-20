@@ -39,6 +39,7 @@ public:
 	void visit(WhileExpr& node) override;
 	void visit(FunctionDeclExpr& node) override;
 	void visit(StructDeclExpr& node) override;
+	void visit(StructCreateExpr& node) override;
 	void visit(CallExpr& node) override;
 	void visit(ReturnExpr& node) override;
 	void visit(ImportExpr& node) override;
@@ -47,7 +48,6 @@ public:
 	void visit(PostfixExpr& node) override {}
 	void visit(BorrowExpr& node) override {}
 	void visit(GenericCallExpr& node) override {}
-	void visit(StructCreateExpr& node) override {}
 	void visit(CastExpr& node) override {}
 	void visit(AssignExpr& node) override {}
 	void visit(LoopExpr& node) override {}
