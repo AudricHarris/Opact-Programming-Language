@@ -8,5 +8,5 @@ class StructSymbol : public Symbol {
 		StructSymbol(std::string name, std::shared_ptr<StructType> structType)
 			: Symbol(std::move(name), structType) {}
 
-		SymbolKind getKind() const override {std::cout << "Struct\n"; return SymbolKind::Struct; }
+		SymbolKind getKind() const override {return SymbolKind::Struct; }
 };
