@@ -355,14 +355,70 @@ void CodeGenerator::visit(VarDeclExpr& node) {
 }
 
 void CodeGenerator::visit(AssignExpr& node) {
-	auto* id = dynamic_cast<IdentifierExpr*>(node.target.get());
-	if (!id) { error("Only variables can be assigned to (for now)"); return; }
-	VarInfo* var = lookupVar(id->name);
-	if (!var) { error("Undefined variable '" + id->name + "'"); return; }
+	lastValue = nullptr;
+	llvm::Value* targetPtr = nullptr;
+	llvm::Type* targetType = nullptr;
 
-	llvm::Value* v = coerce(emit(node.value.get()), var->type);
-	if (!v) { lastValue = nullptr; return; }
-	builder.CreateStore(v, var->addr);
+	if (auto* id = dynamic_cast<IdentifierExpr*>(node.target.get())) {
+		VarInfo* var = lookupVar(id->name);
+		if (!var) {
+			error("Undefined variable '" + id->name + "'");
+			return;
+		}
+		targetPtr = var->addr;
+		targetType = var->type;
+	} 
+	else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.target.get())) {
+		llvm::Value* objPtr = nullptr;
+		llvm::StructType* structTy = nullptr;
+
+		if (auto* objId = dynamic_cast<IdentifierExpr*>(ma->object.get())) {
+			VarInfo* var = lookupVar(objId->name);
+			if (!var) {
+				error("Undefined variable '" + objId->name + "'");
+				return;
+			}
+			objPtr = var->addr;
+			structTy = llvm::dyn_cast<llvm::StructType>(var->type);
+		} else {
+			objPtr = emit(ma->object.get());
+		}
+
+		if (!structTy) {
+			error("Member access '.' is only supported on structures");
+			return;
+		}
+
+		std::string structName = structTy->getName().str();
+		auto it = structs.find(structName);
+		if (it == structs.end()) {
+			error("Unknown structure type metadata for '" + structName + "'");
+			return;
+		}
+
+		const auto& fieldNames = it->second.fieldNames;
+		auto fieldIt = std::find(fieldNames.begin(), fieldNames.end(), ma->memberName);
+		if (fieldIt == fieldNames.end()) {
+			error("Structure '" + structName + "' has no field named '" + ma->memberName + "'");
+			return;
+		}
+
+		int fieldIndex = static_cast<int>(std::distance(fieldNames.begin(), fieldIt));
+		targetPtr = builder.CreateStructGEP(structTy, objPtr, fieldIndex, ma->memberName + "_ptr");
+		targetType = structTy->getElementType(fieldIndex);
+	} 
+	else {
+		error("Only variables or structure fields can be assigned to");
+		return;
+	}
+
+	llvm::Value* v = coerce(emit(node.value.get()), targetType);
+	if (!v) {
+		lastValue = nullptr;
+		return;
+	}
+	
+	builder.CreateStore(v, targetPtr);
 	lastValue = v;
 }
 
