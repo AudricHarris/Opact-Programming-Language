@@ -3,15 +3,12 @@
 
 #include "../Parser/Ast.hpp"
 #include "Scope/ScopeManager.hpp"
-#include "Symbol/FunctionSymbol.hpp"
 #include "Types/Type.hpp"
-#include "Types/PrimitiveType.hpp"
 #include "Types/FunctionType.hpp"
 #include "Types/StructType.hpp"
 #include <memory>
 #include <string>
 #include <unordered_set>
-#include <vector>
 
 class CompilerPipeline;
 
@@ -20,9 +17,11 @@ public:
 	TypeChecker(CompilerPipeline* pipeline = nullptr, const std::string& filePath = "");
 	
 	std::string currentFilePath;
+	bool correctCode = true;
 	// Main entry point (public API unchanged: returns the AST-level TypeDesc)
 	TypeDesc check(Expression& node);
-
+	void ShowErrorCount();
+	
 	// Declares top-level functions first (so they can be called before their
 	// definition), then type checks the whole tree.
 	void initialize(const ExprPtr& m);
@@ -67,6 +66,7 @@ private:
 	std::shared_ptr<Type> currentReturnType;
 	std::unordered_set<const FunctionDeclExpr*> declaredFunctions_;
 	std::unordered_set<const StructDeclExpr*> declaredStructures_;
+	std::vector<FunctionDeclExpr> persistentBuiltins_;
 	int errorCount_ = 0;
 
 	std::shared_ptr<Type> typeOf(Expression& node);
@@ -77,5 +77,6 @@ private:
 	void declareFunction(const FunctionDeclExpr& fn);
 	void declareStructures(const StructDeclExpr& structure);
 
+	void declareBuiltins();
 	void reportError(const std::string& message);
 };

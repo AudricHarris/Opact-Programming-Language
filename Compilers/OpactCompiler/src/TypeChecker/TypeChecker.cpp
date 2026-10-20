@@ -1,37 +1,87 @@
 #include "TypeChecker.hpp"
 #include "../Parser/Ast.hpp"
 #include "../Parser/CompilerPipeline.hpp"
+#include "Symbol/FunctionSymbol.hpp"
 #include "Symbol/StructSymbol.hpp"
 #include "Symbol/VarSymbol.hpp"
+#include "Types/PrimitiveType.hpp"
 #include "Types/StructType.hpp"
+#include "Types/Type.hpp"
 #include <algorithm>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <utility>
+#include <vector>
 
 namespace {
-// The ONLY place that touches Token's text member. If your Token uses a
-// different field name (value, text, str, ...), change it here.
-std::string tokenText(const Token& t) { return t.getWord(); }
+	// The ONLY place that touches Token's text member. If your Token uses a
+	// different field name (value, text, str, ...), change it here.
+	std::string tokenText(const Token& t) { return t.getWord(); }
 
-std::shared_ptr<Type> prim(BuiltinType t) { return std::make_shared<PrimitiveType>(t); }
+	std::shared_ptr<Type> prim(BuiltinType t) { return std::make_shared<PrimitiveType>(t); }
 
-bool isPrim(const std::shared_ptr<Type>& t, BuiltinType b) {
-	return t && t->getKind() == TypeKind::Primitive &&
-	       static_cast<const PrimitiveType*>(t.get())->getBuiltinType() == b;
-}
+	bool isPrim(const std::shared_ptr<Type>& t, BuiltinType b) {
+		return t && t->getKind() == TypeKind::Primitive &&
+			static_cast<const PrimitiveType*>(t.get())->getBuiltinType() == b;
+	}
 
-bool isNumeric(const std::shared_ptr<Type>& t) {
-	return isPrim(t, BuiltinType::Int) || isPrim(t, BuiltinType::Float);
-}
+	bool isNumeric(const std::shared_ptr<Type>& t) {
+		return isPrim(t, BuiltinType::Int) || isPrim(t, BuiltinType::Float);
+	}
 } // namespace
 
-
-
 TypeChecker::TypeChecker(CompilerPipeline* pipeline, const std::string& filePath)
-	: pipeline(pipeline), currentFilePath(filePath), currentType(prim(BuiltinType::Void)) {}
+	: pipeline(pipeline), currentFilePath(filePath), currentType(prim(BuiltinType::Void)) 
+{
+	this->declareBuiltins();
+}
+
+void TypeChecker::ShowErrorCount()
+{
+	std::cerr << "Total error Count after TypeChecker : " << this->errorCount_ << "\n";
+}
+
+// Handling Built in functions 
+struct BuiltinParam {
+	const char* name;
+	DataType type;
+};
+
+struct BuiltinInfo {
+	const char* name;
+	DataType returnType;
+	std::initializer_list<BuiltinParam> params;
+};
+
+void TypeChecker::declareBuiltins() {
+	std::initializer_list<BuiltinInfo> builtins = {
+		{ "Printf", DataType::Void, { {"Text", DataType::Str} } },
+		{ "Println", DataType::Void, { {"Text", DataType::Str} } },
+	};
+
+	persistentBuiltins_.reserve(builtins.size());
+
+	for (const auto& info : builtins) {
+		auto& fn = persistentBuiltins_.emplace_back();
+		fn.name = info.name;
+		ExprPtr body;
+		fn.body = std::move(body);
+		fn.returnType.type = info.returnType;
+
+		for (const auto& p : info.params) {
+			TypeDesc pType;
+			pType.type = p.type;
+			fn.params.emplace_back(p.name, std::move(pType), false, false, std::nullopt);
+		}
+
+		this->declareFunction(fn);
+	}
+}
 
 void TypeChecker::reportError(const std::string& message) {
 	++errorCount_;
+	this->correctCode = false;
 	std::cerr << "Type error: " << message << "\n";
 }
 
@@ -46,15 +96,15 @@ std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
 		case DataType::Str:   return prim(BuiltinType::Str);
 		case DataType::Void:  return prim(BuiltinType::Void);
 		case DataType::Custom: {
-			std::string name = d.customTypeName;
-			if (name.empty() && d.customName) name = tokenText(*d.customName);
-			auto sym = scopeManager.lookup(name);
-			if (!sym || sym->getKind() != SymbolKind::Class) {
-				reportError("Unknown type: " + name);
-				return prim(BuiltinType::Void);
-			}
-			return sym->getType();
-		}
+								   std::string name = d.customTypeName;
+								   if (name.empty() && d.customName) name = tokenText(*d.customName);
+								   auto sym = scopeManager.lookup(name);
+								   if (!sym || sym->getKind() != SymbolKind::Class) {
+									   reportError("Unknown type: " + name);
+									   return prim(BuiltinType::Void);
+								   }
+								   return sym->getType();
+							   }
 	}
 	return prim(BuiltinType::Void);
 }
@@ -207,12 +257,12 @@ void TypeChecker::visit(CallExpr& node) {
 
 	if (params.size() != argTypes.size()) {
 		reportError("Expected " + std::to_string(params.size()) + " argument(s) but got " +
-		            std::to_string(argTypes.size()));
+				std::to_string(argTypes.size()));
 	} else {
 		for (size_t i = 0; i < params.size(); ++i) {
 			if (!params[i]->equals(argTypes[i].get())) {
 				reportError("Argument " + std::to_string(i + 1) + ": expected " +
-				            params[i]->toString() + " but got " + argTypes[i]->toString());
+						params[i]->toString() + " but got " + argTypes[i]->toString());
 			}
 		}
 	}
@@ -228,7 +278,7 @@ void TypeChecker::visit(ReturnExpr& node) {
 		reportError("'return' outside of a function");
 	} else if (!currentReturnType->equals(valueType.get())) {
 		reportError("Return type mismatch: expected " + currentReturnType->toString() +
-		            " but got " + valueType->toString());
+				" but got " + valueType->toString());
 	}
 	currentType = prim(BuiltinType::Void);
 }
@@ -264,7 +314,7 @@ void TypeChecker::visit(VarDeclExpr& node) {
 			declared = initType; // no explicit type given: infer from initializer
 		} else if (!declared->equals(initType.get())) {
 			reportError("Type mismatch in declaration of " + tokenText(node.name) +
-			            ": expected " + declared->toString() + " but got " + initType->toString());
+					": expected " + declared->toString() + " but got " + initType->toString());
 		}
 	}
 
@@ -338,7 +388,7 @@ void TypeChecker::visit(Block& node) {
 	for (auto& expr : node.expressions) {
 		if (expr) last = typeOf(*expr);
 	}
-	scopeManager.dump();
+	//scopeManager.dump();
 	scopeManager.exitScope();
 	currentType = last; // a block evaluates to its last expression
 }
@@ -400,7 +450,7 @@ void TypeChecker::visit(ImportExpr& node) {
 			if (auto* fn = dynamic_cast<FunctionDeclExpr*>(expr.get())) {
 				if (fn->isPublic) {
 					if (node.isSelectiveImport && !(std::find(node.importedSymbols.begin(), node.importedSymbols.end(), fn->name) != node.importedSymbols.end())) continue;
-					
+
 					auto fnType = buildFunctionType(*fn);
 					auto sym = std::make_shared<FunctionSymbol>(fn->name, fnType);
 					scopeManager.declare(fn->name, sym);

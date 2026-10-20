@@ -259,36 +259,38 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 
 	Token nameTok = this->expect(TokenKind::IDENTIFIER, "Expected identifier as name");
 	std::string name = nameTok.getWord();
-	
+
 	this->expect(TokenKind::LBRACE, "Expected '{' for opening structure body");
 
 	std::vector<StructureField> fields;
 	do
+	{
+		bool isMut = false;
+		if (this->check(TokenKind::MUT))
 		{
-			bool isMut = false;
-			if (this->check(TokenKind::MUT))
-			{
-				isMut = true;
-				this->consume();
-			}
-
-			Token ptypeTok = this->expect(TokenKind::IDENTIFIER, "Expected type for the param");
-			Token pnameTok = this->expect(TokenKind::IDENTIFIER, "Expected name for the param");
-
-			std::optional<ExprPtr> defaultVal = std::nullopt;
-			if (this->match(TokenKind::ASSIGN))
-			{
-				defaultVal = this->parseExpression();
-			}
-
-			TypeDesc ptype;
-			ptype.type = determineType(ptypeTok);
-			ptype.customTypeName = ptypeTok.getWord();
-
-			fields.emplace_back(pnameTok.getWord(), std::move(ptype), isMut, std::move(defaultVal));
+			isMut = true;
+			this->consume();
 		}
-		while (this->match(TokenKind::RBRACE));
-	
+
+		Token ptypeTok = this->expect(TokenKind::IDENTIFIER, "Expected type for the param");
+		Token pnameTok = this->expect(TokenKind::IDENTIFIER, "Expected name for the param");
+
+		std::optional<ExprPtr> defaultVal = std::nullopt;
+		if (this->match(TokenKind::ASSIGN))
+		{
+			defaultVal = this->parseExpression();
+		}
+
+		TypeDesc ptype;
+		ptype.type = determineType(ptypeTok);
+		ptype.customTypeName = ptypeTok.getWord();
+		
+		this->consume(); // Point virgule
+		std::cout <<"Parser step struct :"<< pnameTok.getWord() << "\n";
+		fields.emplace_back(pnameTok.getWord(), std::move(ptype), isMut, std::move(defaultVal));
+	}
+	while (!this->match(TokenKind::RBRACE));
+
 	return std::make_unique<StructDeclExpr>(std::move(name), std::move(fields), isPublic);
 }
 
@@ -608,34 +610,34 @@ ExprPtr Parser::parseAssignement()
 
 	switch (symbolAssign.getKind()) {
 		case TokenKind::ASSIGN: {
-			this->consume();
-			ExprPtr val = this->parseAssignement();
-			return std::make_unique<AssignExpr>(std::move(target), std::move(val), AssignKind::Assign);
-		}
+									this->consume();
+									ExprPtr val = this->parseAssignement();
+									return std::make_unique<AssignExpr>(std::move(target), std::move(val), AssignKind::Assign);
+								}
 
 		case TokenKind::ADD_ASSIGN:
 		case TokenKind::SUB_ASSIGN:
 		case TokenKind::MUL_ASSIGN:
 		case TokenKind::DIV_ASSIGN: {
-			this->consume();
+										this->consume();
 
-			BinaryOp op;
-			switch (symbolAssign.getKind()) {
-				case TokenKind::ADD_ASSIGN: op = BinaryOp::Add; break;
-				case TokenKind::SUB_ASSIGN: op = BinaryOp::Sub; break;
-				case TokenKind::MUL_ASSIGN: op = BinaryOp::Mul; break;
-				case TokenKind::DIV_ASSIGN: op = BinaryOp::Div; break;
-				default: break;
-			}
+										BinaryOp op;
+										switch (symbolAssign.getKind()) {
+											case TokenKind::ADD_ASSIGN: op = BinaryOp::Add; break;
+											case TokenKind::SUB_ASSIGN: op = BinaryOp::Sub; break;
+											case TokenKind::MUL_ASSIGN: op = BinaryOp::Mul; break;
+											case TokenKind::DIV_ASSIGN: op = BinaryOp::Div; break;
+											default: break;
+										}
 
-			ExprPtr val = this->parseAssignement();
+										ExprPtr val = this->parseAssignement();
 
-			ExprPtr rhs = std::make_unique<BinaryExpr>(op, target->clone(), std::move(val));
-			return std::make_unique<AssignExpr>(std::move(target), std::move(rhs), AssignKind::Assign); // <-- Ensured this returns
-		}
+										ExprPtr rhs = std::make_unique<BinaryExpr>(op, target->clone(), std::move(val));
+										return std::make_unique<AssignExpr>(std::move(target), std::move(rhs), AssignKind::Assign); // <-- Ensured this returns
+									}
 
 		default:
-			return target;
+									return target;
 	}
 }
 

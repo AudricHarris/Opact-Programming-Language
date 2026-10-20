@@ -165,6 +165,12 @@ class CompilerPipeline {
 
 				TypeChecker t(this, path);
 				t.initialize(module.astRoot);
+				
+				if (!t.correctCode) 
+				{
+					t.ShowErrorCount();
+					continue;
+				}
 
 				llvm::LLVMContext llvmContext;
 				CodeGenerator codegen(path, llvmContext);
