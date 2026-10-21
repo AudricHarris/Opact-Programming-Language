@@ -44,13 +44,13 @@ public:
 	void visit(CallExpr& node) override;
 	void visit(ReturnExpr& node) override;
 	void visit(ImportExpr& node) override;
+	void visit(BorrowExpr& node) override;
+	void visit(AssignExpr& node) override;
+	void visit(PostfixExpr& node) override;
 
 	// Stub out remaining ASTVisitor pure virtuals...
-	void visit(PostfixExpr& node) override {}
-	void visit(BorrowExpr& node) override {}
 	void visit(GenericCallExpr& node) override {}
 	void visit(CastExpr& node) override {}
-	void visit(AssignExpr& node) override {}
 	void visit(LoopExpr& node) override {}
 	void visit(ArrayIndexExpr& node) override {}
 	void visit(ArrayLiteralExpr& node) override {}
@@ -79,4 +79,6 @@ private:
 
 	void declareBuiltins();
 	void reportError(const std::string& message);
+	bool isWritable(Expression& e);
+	std::shared_ptr<Type> valueTypeOf(Expression& node);
 };

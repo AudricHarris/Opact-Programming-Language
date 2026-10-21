@@ -59,8 +59,10 @@ ExprPtr CodeGenerator::parseInlineExpression(const std::string& src) {
 }
 
 bool CodeGenerator::appendFormatArg(llvm::Value*& v, std::string& fmt) {
+	if (!v) return false;
 	llvm::Type* t = v->getType();
-	if (t->isIntegerTy(1)) {            // bool -> "true"/"false"
+	
+	if (t->isIntegerTy(1)) {
 		fmt += "%s";
 		v = builder.CreateSelect(v, builder.CreateGlobalString("true"),
 		                         builder.CreateGlobalString("false"), "boolstr");
@@ -70,8 +72,16 @@ bool CodeGenerator::appendFormatArg(llvm::Value*& v, std::string& fmt) {
 	if (t->isIntegerTy(32)) { fmt += "%d";   return true; }
 	if (t->isIntegerTy())   { fmt += "%lld"; v = coerce(v, builder.getInt64Ty()); return true; }
 	if (t->isFloatingPointTy()) { fmt += "%f"; v = promoteVarArg(v); return true; }
-	if (t->isPointerTy())   { fmt += "%s";   return true; }
-	error("Printf: cannot format a value of this type");
+	
+	if (t->isPointerTy()) {
+		fmt += "%s";
+		return true;
+	}
+
+	if (t->isStructTy())
+		error("Printf: cannot format a whole structure; print its fields instead (e.g. {h.name})");
+	else
+		error("Printf: cannot format a value of this type");
 	return false;
 }
 
@@ -121,7 +131,23 @@ llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 				v = emit(e.get());
 			}
 
-			if (!v || !appendFormatArg(v, fmt)) return nullptr;
+			if (!v) return nullptr;
+
+			// `{h}` / `{}` naming a structure (or a reference to one) cannot be printed
+			std::string varName = inner;
+			if (inner.empty()) {
+				if (auto* idArg = dynamic_cast<IdentifierExpr*>(call.arguments[nextPositional - 1].get()))
+					varName = idArg->name;
+			}
+			if (!varName.empty()) {
+				VarInfo* sv = lookupVar(varName);
+				if (sv && sv->structType) {
+					error("Printf: '" + varName + "' is a structure; print its fields instead (e.g. {" +
+					      varName + ".field})");
+					return nullptr;
+				}
+			}
+			if (!appendFormatArg(v, fmt)) return nullptr;
 			args.push_back(v);
 			i = j;
 		} else if (c == '}') {

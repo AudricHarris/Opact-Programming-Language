@@ -352,6 +352,8 @@ ExprPtr Parser::parseFunction(std::optional<Token> visib)
 			TypeDesc ptype;
 			ptype.type = determineType(ptypeTok);
 			ptype.customTypeName = ptypeTok.getWord();
+			ptype.isReference = isRef;
+			ptype.isMutable = isMut;
 
 			params.emplace_back(pnameTok.getWord(), std::move(ptype), isMut, isRef, std::move(defaultVal));
 		}
@@ -365,9 +367,23 @@ ExprPtr Parser::parseFunction(std::optional<Token> visib)
 
 	if (this->match(TokenKind::RETURN_TYPE))
 	{
+		bool isMut = false, isRef = false;
+		if (this->check(TokenKind::AND))
+		{
+			isRef = true;
+			this->consume();
+			if (this->check(TokenKind::MUT))
+			{
+				isMut = true;
+				this->consume();
+			}
+		}
+
 		Token retTypeTok = this->expect(TokenKind::IDENTIFIER, "Expected a return type for the function");
 		returnType.type = determineType(retTypeTok);
 		returnType.customTypeName = retTypeTok.getWord();
+		returnType.isReference = isRef;
+		returnType.isMutable = isMut;
 	}
 
 	ExprPtr body = this->parseBlock();

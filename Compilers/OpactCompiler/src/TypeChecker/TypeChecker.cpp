@@ -5,6 +5,7 @@
 #include "Symbol/StructSymbol.hpp"
 #include "Symbol/VarSymbol.hpp"
 #include "Types/PrimitiveType.hpp"
+#include "Types/ReferenceType.hpp"
 #include "Types/StructType.hpp"
 #include "Types/Type.hpp"
 #include <algorithm>
@@ -28,6 +29,17 @@ namespace {
 
 	bool isNumeric(const std::shared_ptr<Type>& t) {
 		return isPrim(t, BuiltinType::Int) || isPrim(t, BuiltinType::Float);
+	}
+
+	// `&T` / `&mut T` -> `T` (references are auto-dereferenced when used as values)
+	std::shared_ptr<Type> stripRef(const std::shared_ptr<Type>& t) {
+		if (t && t->getKind() == TypeKind::Reference)
+			return static_cast<const ReferenceType*>(t.get())->getInnerType();
+		return t;
+	}
+
+	bool isRefType(const std::shared_ptr<Type>& t) {
+		return t && t->getKind() == TypeKind::Reference;
 	}
 } // namespace
 
@@ -88,26 +100,33 @@ void TypeChecker::reportError(const std::string& message) {
 // ---------- Type conversion helpers ----------
 
 std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
+	std::shared_ptr<Type> baseType = prim(BuiltinType::Void);
 	switch (d.type) {
-		case DataType::Int:   return prim(BuiltinType::Int);
-		case DataType::Float: return prim(BuiltinType::Float);
-		case DataType::Bool:  return prim(BuiltinType::Bool);
-		case DataType::Char:  return prim(BuiltinType::Char);
-		case DataType::Str:   return prim(BuiltinType::Str);
-		case DataType::Void:  return prim(BuiltinType::Void);
+		case DataType::Int:   baseType = prim(BuiltinType::Int);   break;
+		case DataType::Float: baseType = prim(BuiltinType::Float); break;
+		case DataType::Bool:  baseType = prim(BuiltinType::Bool);  break;
+		case DataType::Char:  baseType = prim(BuiltinType::Char);  break;
+		case DataType::Str:   baseType = prim(BuiltinType::Str);   break;
+		case DataType::Void:  baseType = prim(BuiltinType::Void);  break;
 		case DataType::Custom: {
-								   std::string name = d.customTypeName;
-								   if (name.empty() && d.customName) name = tokenText(*d.customName);
-								   auto sym = scopeManager.lookup(name);
-								   
-								   if (!sym || sym->getKind() != SymbolKind::Struct) {
-									   reportError("Unknown type: " + name);
-									   return prim(BuiltinType::Void);
-								   }
-								   return sym->getType();
-							   }
+			std::string name = d.customTypeName;
+			if (name.empty() && d.customName) name = tokenText(*d.customName);
+			auto sym = scopeManager.lookup(name);
+			
+			if (!sym || sym->getKind() != SymbolKind::Struct) {
+				reportError("Unknown type: " + name);
+				return prim(BuiltinType::Void);
+			}
+			baseType = sym->getType();
+			break;
+		}
 	}
-	return prim(BuiltinType::Void);
+
+	if (d.isReference) {
+		return std::make_shared<ReferenceType>(baseType, d.isMutable);
+	}
+
+	return baseType;
 }
 
 TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
@@ -132,6 +151,17 @@ TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
 			// TypeDesc cannot describe function types; Void is the fallback.
 			d.type = DataType::Void;
 			break;
+		case TypeKind::Reference:
+			auto* refType = static_cast<const ReferenceType*>(type.get());
+			d.isReference = true;
+			d.isMutable = refType->isMutable();
+
+			TypeDesc innerDesc = toDesc(refType->getInnerType());
+			d.type = innerDesc.type;
+			d.customName = innerDesc.customName;
+			d.customTypeName = innerDesc.customTypeName;
+			d.dim = innerDesc.dim;
+			break;
 	}
 	return d;
 }
@@ -140,6 +170,35 @@ std::shared_ptr<Type> TypeChecker::typeOf(Expression& node) {
 	currentType = prim(BuiltinType::Void); // never leak a stale result
 	node.accept(*this);
 	return currentType ? currentType : prim(BuiltinType::Void);
+}
+
+// Type of `node` when used as a value: references are dereferenced.
+std::shared_ptr<Type> TypeChecker::valueTypeOf(Expression& node) {
+	return stripRef(typeOf(node));
+}
+
+// Can the location denoted by `e` be written to?
+//   x          -> plain variable: yes;  reference variable: only if `&mut`
+//   x.a.b      -> writable iff the root `x` is (a `&` reference makes it read-only)
+//   anything else (literals, arithmetic, ...) is not an assignable location,
+//   except a call returning `&mut T`, which is handled via its type.
+bool TypeChecker::isWritable(Expression& e) {
+	if (auto* id = dynamic_cast<IdentifierExpr*>(&e)) {
+		auto sym = scopeManager.lookup(id->name);
+		if (!sym) return true; // "undeclared identifier" is reported elsewhere
+		auto ty = sym->getType();
+		if (isRefType(ty)) return static_cast<const ReferenceType*>(ty.get())->isMutable();
+		return true;
+	}
+	if (auto* ma = dynamic_cast<MemberAccessExpr*>(&e)) {
+		if (!ma->object) return false;
+		Expression& obj = *ma->object;
+		if (dynamic_cast<IdentifierExpr*>(&obj) || dynamic_cast<MemberAccessExpr*>(&obj))
+			return isWritable(obj);
+		auto ty = typeOf(obj);
+		return isRefType(ty) && static_cast<const ReferenceType*>(ty.get())->isMutable();
+	}
+	return false;
 }
 
 TypeDesc TypeChecker::check(Expression& node) {
@@ -151,7 +210,9 @@ TypeDesc TypeChecker::check(Expression& node) {
 std::shared_ptr<FunctionType> TypeChecker::buildFunctionType(const FunctionDeclExpr& fn) {
 	std::vector<std::shared_ptr<Type>> params;
 	params.reserve(fn.params.size());
-	for (const auto& p : fn.params) params.push_back(fromDesc(p.type));
+	for (const auto& p : fn.params) {
+		params.push_back(fromDesc(p.type));
+	}
 	return std::make_shared<FunctionType>(fromDesc(fn.returnType), std::move(params));
 }
 
@@ -231,6 +292,21 @@ void TypeChecker::visit(FunctionDeclExpr& node) {
 	currentType = prim(BuiltinType::Void);
 }
 
+void TypeChecker::visit(BorrowExpr& node) {
+	if (!node.expr) {
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+	auto innerType = typeOf(*node.expr);
+
+	if (node.isMutable && !isWritable(*node.expr)) {
+		reportError("Cannot take a mutable reference (&mut) here: the value is behind an "
+		            "immutable reference or is not an assignable location");
+	}
+
+	// Re-borrowing `&r` of a reference variable still points at the original object.
+	currentType = std::make_shared<ReferenceType>(stripRef(innerType), node.isMutable);
+}
 
 // Structure
 void TypeChecker::visit(StructDeclExpr& node) {
@@ -290,6 +366,12 @@ void TypeChecker::visit(MemberAccessExpr &node)
 	}
 
 	auto baseType = typeOf(*node.object);
+
+	// Auto-dereference if the object is a reference to a struct
+	if (baseType->getKind() == TypeKind::Reference) {
+		baseType = static_cast<const ReferenceType*>(baseType.get())->getInnerType();
+	}
+
 	if (baseType->getKind() != TypeKind::Struct) {
 		reportError("Member access '.' applied to non-structure type");
 		currentType = prim(BuiltinType::Void);
@@ -297,7 +379,7 @@ void TypeChecker::visit(MemberAccessExpr &node)
 	}
 
 	auto* strct = static_cast<StructType*>(baseType.get());
-	const auto* field = strct->getField(node.memberName); // Assuming node.memberName holds the field string
+	const auto* field = strct->getField(node.memberName);
 
 	if (!field) {
 		reportError("Structure '" + strct->getName() + "' has no member named '" + node.memberName + "'");
@@ -306,6 +388,22 @@ void TypeChecker::visit(MemberAccessExpr &node)
 	}
 
 	currentType = field->type;
+}
+
+
+bool isTypeCompatible(const std::shared_ptr<Type>& expected, const Type* actual) {
+	if (!expected || !actual) return false;
+
+	// Checked BEFORE equals(): we cannot rely on Type::equals comparing mutability.
+	if (expected->getKind() == TypeKind::Reference && actual->getKind() == TypeKind::Reference) {
+		auto* expRef = static_cast<const ReferenceType*>(expected.get());
+		auto* actRef = static_cast<const ReferenceType*>(actual);
+
+		if (!expRef->getInnerType()->equals(actRef->getInnerType().get())) return false;
+		// &mut T -> &T is fine, &T -> &mut T is not
+		return !expRef->isMutable() || actRef->isMutable();
+	}
+	return expected->equals(actual);
 }
 
 void TypeChecker::visit(CallExpr& node) {
@@ -332,7 +430,9 @@ void TypeChecker::visit(CallExpr& node) {
 				std::to_string(argTypes.size()));
 	} else {
 		for (size_t i = 0; i < params.size(); ++i) {
-			if (!params[i]->equals(argTypes[i].get())) {
+			// Use isTypeCompatible instead of strict equals
+			auto actual = isRefType(params[i]) ? argTypes[i] : stripRef(argTypes[i]);
+			if (!isTypeCompatible(params[i], actual.get())) {
 				reportError("Argument " + std::to_string(i + 1) + ": expected " +
 						params[i]->toString() + " but got " + argTypes[i]->toString());
 			}
@@ -342,13 +442,16 @@ void TypeChecker::visit(CallExpr& node) {
 }
 
 void TypeChecker::visit(ReturnExpr& node) {
-	std::shared_ptr<Type> valueType = (node.value && *node.value)
-		? typeOf(**node.value)
-		: prim(BuiltinType::Void);
+	std::shared_ptr<Type> valueType = prim(BuiltinType::Void);
+	if (node.value && *node.value) {
+		valueType = (currentReturnType && isRefType(currentReturnType))
+			? typeOf(**node.value)
+			: valueTypeOf(**node.value);
+	}
 
 	if (!currentReturnType) {
 		reportError("'return' outside of a function");
-	} else if (!currentReturnType->equals(valueType.get())) {
+	} else if (!isTypeCompatible(currentReturnType, valueType.get())) {
 		reportError("Return type mismatch: expected " + currentReturnType->toString() +
 				" but got " + valueType->toString());
 	}
@@ -381,10 +484,16 @@ void TypeChecker::visit(VarDeclExpr& node) {
 	auto declared = fromDesc(node.type);
 
 	if (node.expr) {
-		auto initType = typeOf(*node.expr);
+		// A reference is kept as a reference only if the variable is declared as
+		// one (or the initializer is an explicit borrow); otherwise it is read as a value.
+		bool keepRef = node.type.isReference || dynamic_cast<BorrowExpr*>(node.expr.get());
+		auto initType = keepRef ? typeOf(*node.expr) : valueTypeOf(*node.expr);
 		if (isPrim(declared, BuiltinType::Void)) {
+			if (isRefType(initType))
+				reportError("Reference variable '" + tokenText(node.name) +
+				            "' needs an explicit type, e.g. &mut int " + tokenText(node.name));
 			declared = initType; // no explicit type given: infer from initializer
-		} else if (!declared->equals(initType.get())) {
+		} else if (!isTypeCompatible(declared, initType.get())) {
 			reportError("Type mismatch in declaration of " + tokenText(node.name) +
 					": expected " + declared->toString() + " but got " + initType->toString());
 		}
@@ -400,8 +509,8 @@ void TypeChecker::visit(VarDeclExpr& node) {
 void TypeChecker::visit(BinaryExpr& node) {
 	if (!node.left || !node.right) { currentType = prim(BuiltinType::Void); return; }
 
-	auto l = typeOf(*node.left);
-	auto r = typeOf(*node.right);
+	auto l = valueTypeOf(*node.left);
+	auto r = valueTypeOf(*node.right);
 
 	switch (node.op) {
 		case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
@@ -441,7 +550,7 @@ void TypeChecker::visit(BinaryExpr& node) {
 void TypeChecker::visit(UnaryExpr& node) {
 	if (!node.expr) { currentType = prim(BuiltinType::Void); return; }
 
-	auto t = typeOf(*node.expr);
+	auto t = valueTypeOf(*node.expr);
 	switch (node.op) {
 		case UnaryOp::Negate:
 			if (!isNumeric(t)) reportError("Cannot negate " + t->toString());
@@ -467,7 +576,7 @@ void TypeChecker::visit(Block& node) {
 
 void TypeChecker::visit(IfExpr& node) {
 	if (node.condition) {
-		auto c = typeOf(*node.condition);
+		auto c = valueTypeOf(*node.condition);
 		if (!isPrim(c, BuiltinType::Bool)) {
 			reportError("If condition must be bool, got " + c->toString());
 		}
@@ -485,7 +594,7 @@ void TypeChecker::visit(IfExpr& node) {
 
 void TypeChecker::visit(WhileExpr& node) {
 	if (node.condition) {
-		auto c = typeOf(*node.condition);
+		auto c = valueTypeOf(*node.condition);
 		if (!isPrim(c, BuiltinType::Bool)) {
 			reportError("While condition must be bool, got " + c->toString());
 		}
@@ -532,4 +641,34 @@ void TypeChecker::visit(ImportExpr& node) {
 	}
 
 	currentType = prim(BuiltinType::Void);
+}
+
+
+// ---------- Assignment / ++ -- (with mutability enforcement) ----------
+
+void TypeChecker::visit(AssignExpr& node) {
+	if (!node.target || !node.value) { currentType = prim(BuiltinType::Void); return; }
+
+	// For `r = v` / `r.x = v` the left side is the *referenced* value.
+	auto targetType = valueTypeOf(*node.target);
+	auto valueType  = valueTypeOf(*node.value);
+
+	if (!isWritable(*node.target)) {
+		reportError("Cannot assign through an immutable reference (declare it as &mut)");
+	}
+	if (!targetType->equals(valueType.get())) {
+		reportError("Cannot assign " + valueType->toString() + " to " + targetType->toString());
+	}
+	currentType = targetType;
+}
+
+void TypeChecker::visit(PostfixExpr& node) {
+	if (!node.expr) { currentType = prim(BuiltinType::Void); return; }
+
+	auto t = valueTypeOf(*node.expr);
+	if (!isNumeric(t)) reportError("++/-- requires a numeric operand, got " + t->toString());
+	if (!isWritable(*node.expr)) {
+		reportError("Cannot modify a value through an immutable reference (declare it as &mut)");
+	}
+	currentType = t;
 }

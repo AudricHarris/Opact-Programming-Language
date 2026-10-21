@@ -25,6 +25,9 @@ CodeGenerator::CodeGenerator(const std::string& moduleName, llvm::LLVMContext& c
 //  2. Type system (single place to extend when adding types)               //
 //==========================================================================//
 llvm::Type* CodeGenerator::mapType(const TypeDesc& d) {
+	if (d.isReference) {
+		return builder.getPtrTy();
+	}
 	switch (d.type) {
 		case DataType::Int:   return builder.getInt32Ty();
 		case DataType::Float: return builder.getDoubleTy();
@@ -57,6 +60,11 @@ llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 	if (!v || !to) return nullptr;
 	llvm::Type* from = v->getType();
 	if (from == to) return v;
+
+	// If both are pointers, always allow pointer bitcast
+	if (from->isPointerTy() && to->isPointerTy())
+		return builder.CreatePointerCast(v, to, "ptrcast");
+
 	if (to->isIntegerTy(1)) return toBool(v);
 
 	if (from->isIntegerTy() && to->isIntegerTy()) {
@@ -72,10 +80,6 @@ llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 	if (from->isFloatingPointTy() && to->isFloatingPointTy())
 		return from->getPrimitiveSizeInBits() < to->getPrimitiveSizeInBits()
 			? builder.CreateFPExt(v, to, "fpext") : builder.CreateFPTrunc(v, to, "fptrunc");
-
-	// Pointer / string literal coercion
-	if (from->isPointerTy() && to->isPointerTy())
-		return builder.CreatePointerCast(v, to, "ptrcast");
 
 	error("Cannot convert between these types");
 	return nullptr;
@@ -183,6 +187,19 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 void CodeGenerator::error(const std::string& msg) {
 	++errorCount;
 	std::cerr << "Codegen Error: " << msg << "\n";
+}
+
+// Evaluates `e` where a *reference* (an address) is wanted, not a value.
+// A reference variable to a primitive is normally auto-dereferenced when read
+// (see visit(IdentifierExpr)); here we hand out the stored pointer instead, so
+// references can be forwarded to other functions / reference variables.
+llvm::Value* CodeGenerator::emitRef(Expression* e) {
+	if (auto* id = dynamic_cast<IdentifierExpr*>(e)) {
+		VarInfo* var = lookupVar(id->name);
+		if (var && var->pointee)
+			return builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_ref");
+	}
+	return emit(e);
 }
 
 // Evaluate an expression and return its value (nullptr if none / error).
@@ -323,6 +340,12 @@ void CodeGenerator::visit(IdentifierExpr& node) {
 		lastValue = nullptr;
 		return;
 	}
+	if (var->pointee) {
+		// Reference to a primitive: load the pointer, then the value behind it.
+		llvm::Value* p = builder.CreateLoad(builder.getPtrTy(), var->addr, node.name + "_ref");
+		lastValue = builder.CreateLoad(var->pointee, p, node.name);
+		return;
+	}
 	lastValue = builder.CreateLoad(var->type, var->addr, node.name);
 }
 
@@ -330,7 +353,9 @@ void CodeGenerator::visit(VarDeclExpr& node) {
 	std::string name = tokenText(node.name);
 	if (!currentFn) { error("Variable '" + name + "' declared outside of a function"); return; }
 
-	llvm::Value* init = node.expr ? emit(node.expr.get()) : nullptr;
+	// A declared reference wants an address, everything else wants a value.
+	llvm::Value* init = nullptr;
+	if (node.expr) init = node.type.isReference ? emitRef(node.expr.get()) : emit(node.expr.get());
 	if (node.expr && !init) { lastValue = nullptr; return; }
 
 	llvm::Type* ty = (node.type.type == DataType::Void && init) ? init->getType() : mapType(node.type);
@@ -350,7 +375,25 @@ void CodeGenerator::visit(VarDeclExpr& node) {
 
 	llvm::AllocaInst* slot = createEntryAlloca(currentFn, ty, name);
 	builder.CreateStore(initVal, slot);
-	scopes.back()[name] = { slot, ty };
+
+	llvm::StructType* st = nullptr;
+	if (node.type.type == DataType::Custom) {
+		auto it = structs.find(node.type.customTypeName);
+		if (it != structs.end()) {
+			st = it->second.type;
+		}
+	}
+
+	// For references to non-struct types remember what the pointer points at.
+	llvm::Type* pointee = nullptr;
+	if (node.type.isReference) {
+		TypeDesc inner = node.type;
+		inner.isReference = false;
+		llvm::Type* p = mapType(inner);
+		if (p && !p->isStructTy() && !p->isVoidTy()) pointee = p;
+	}
+
+	scopes.back()[name] = { slot, ty, st, pointee };
 	lastValue = initVal;
 }
 
@@ -365,8 +408,14 @@ void CodeGenerator::visit(AssignExpr& node) {
 			error("Undefined variable '" + id->name + "'");
 			return;
 		}
-		targetPtr = var->addr;
-		targetType = var->type;
+		if (var->pointee) {
+			// `r = value` on a reference writes to the referenced object.
+			targetPtr  = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_ref");
+			targetType = var->pointee;
+		} else {
+			targetPtr  = var->addr;
+			targetType = var->type;
+		}
 	} 
 	else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.target.get())) {
 		llvm::Value* objPtr = nullptr;
@@ -378,8 +427,14 @@ void CodeGenerator::visit(AssignExpr& node) {
 				error("Undefined variable '" + objId->name + "'");
 				return;
 			}
-			objPtr = var->addr;
-			structTy = llvm::dyn_cast<llvm::StructType>(var->type);
+			// Handle references/pointers to structs (like function parameters `&mut Human self`)
+			if (var->type->isPointerTy() && var->structType != nullptr) {
+				objPtr = builder.CreateLoad(builder.getPtrTy(), var->addr, objId->name + "_load");
+				structTy = var->structType;
+			} else {
+				objPtr = var->addr;
+				structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
+			}
 		} else {
 			objPtr = emit(ma->object.get());
 		}
@@ -406,7 +461,7 @@ void CodeGenerator::visit(AssignExpr& node) {
 		int fieldIndex = static_cast<int>(std::distance(fieldNames.begin(), fieldIt));
 		targetPtr = builder.CreateStructGEP(structTy, objPtr, fieldIndex, ma->memberName + "_ptr");
 		targetType = structTy->getElementType(fieldIndex);
-	} 
+	}
 	else {
 		error("Only variables or structure fields can be assigned to");
 		return;
@@ -422,26 +477,65 @@ void CodeGenerator::visit(AssignExpr& node) {
 	lastValue = v;
 }
 
+void CodeGenerator::visit(BorrowExpr& node) {
+	lastValue = nullptr;
+	if (auto* id = dynamic_cast<IdentifierExpr*>(node.expr.get())) {
+		VarInfo* var = lookupVar(id->name);
+		if (!var) {
+			error("Undefined variable '" + id->name + "'");
+			return;
+		}
+		// Re-borrowing a reference yields the address it already holds,
+		// not the address of the slot that stores the pointer.
+		if (var->pointee || (var->structType && var->type->isPointerTy()))
+			lastValue = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_reborrow");
+		else
+			lastValue = var->addr; // address of the variable being borrowed
+	} else {
+		error("Cannot borrow non-lvalue expression");
+	}
+}
+
 // ----- Operators ----------------------------------------------------------
 void CodeGenerator::visit(PostfixExpr& node) {
 	auto* id = dynamic_cast<IdentifierExpr*>(node.expr.get());
-	VarInfo* var = id ? lookupVar(id->name) : nullptr;
-	if (!var) { error("++/-- needs a variable"); return; }
-
-	llvm::Value* old = builder.CreateLoad(var->type, var->addr, "old");
-	bool inc = node.op == PostfixOp::Increment;
-	llvm::Value* updated;
-	if (var->type->isFloatingPointTy()) {
-		llvm::Value* one = llvm::ConstantFP::get(var->type, 1.0);
-		updated = inc ? builder.CreateFAdd(old, one, "inc") : builder.CreateFSub(old, one, "dec");
-	} else if (var->type->isIntegerTy()) {
-		llvm::Value* one = llvm::ConstantInt::get(var->type, 1);
-		updated = inc ? builder.CreateAdd(old, one, "inc") : builder.CreateSub(old, one, "dec");
-	} else {
-		error("++/-- needs a numeric variable");
+	if (!id) {
+		error("++/-- requires a variable identifier");
+		lastValue = nullptr;
 		return;
 	}
-	builder.CreateStore(updated, var->addr);
+
+	VarInfo* var = lookupVar(id->name);
+	if (!var) {
+		error("Undefined variable '" + id->name + "'");
+		lastValue = nullptr;
+		return;
+	}
+
+	llvm::Value* targetAddr = var->addr;
+	llvm::Type* targetType = var->type;
+
+	if (var->pointee) {
+		targetAddr = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_ref");
+		targetType = var->pointee;
+	}
+
+	llvm::Value* old = builder.CreateLoad(targetType, targetAddr, "old");
+	bool inc = node.op == PostfixOp::Increment;
+	llvm::Value* updated;
+
+	if (targetType->isFloatingPointTy()) {
+		llvm::Value* one = llvm::ConstantFP::get(targetType, 1.0);
+		updated = inc ? builder.CreateFAdd(old, one, "inc") : builder.CreateFSub(old, one, "dec");
+	} else if (targetType->isIntegerTy()) {
+		llvm::Value* one = llvm::ConstantInt::get(targetType, 1);
+		updated = inc ? builder.CreateAdd(old, one, "inc") : builder.CreateSub(old, one, "dec");
+	} else {
+		error("++/-- requires a numeric variable or reference");
+		return;
+	}
+
+	builder.CreateStore(updated, targetAddr);
 	lastValue = old; // postfix yields the previous value
 }
 
@@ -603,11 +697,29 @@ void CodeGenerator::visit(FunctionDeclExpr& node) {
 	pushScope();
 	size_t idx = 0;
 	for (auto& arg : fn->args()) {
-		const std::string& pname = node.params[idx++].name;
+		const auto& paramDesc = node.params[idx++];
+		const std::string& pname = paramDesc.name;
 		arg.setName(pname);
+		
 		llvm::AllocaInst* slot = createEntryAlloca(fn, arg.getType(), pname);
 		builder.CreateStore(&arg, slot);
-		scopes.back()[pname] = { slot, arg.getType() };
+
+		llvm::StructType* st = nullptr;
+		std::string typeName = paramDesc.type.customTypeName;
+		auto it = structs.find(typeName);
+		if (it != structs.end()) {
+			st = it->second.type;
+		}
+
+		llvm::Type* pointee = nullptr;
+		if (paramDesc.type.isReference) {
+			TypeDesc inner = paramDesc.type;
+			inner.isReference = false;
+			llvm::Type* p = mapType(inner);
+			if (p && !p->isStructTy() && !p->isVoidTy()) pointee = p;
+		}
+
+		scopes.back()[pname] = { slot, arg.getType(), st, pointee };
 	}
 
 	emit(node.body.get());
@@ -684,8 +796,13 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 			error("Undefined variable '" + id->name + "'");
 			return;
 		}
-		objPtr = var->addr;
-		structTy = llvm::dyn_cast<llvm::StructType>(var->type);
+		if (var->type->isPointerTy() && var->structType != nullptr) {
+			objPtr = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_load");
+			structTy = var->structType;
+		} else {
+			objPtr = var->addr;
+			structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
+		}
 	} else {
 		objPtr = emit(node.object.get());
 	}
@@ -734,7 +851,14 @@ void CodeGenerator::visit(CallExpr& node) {
 		std::vector<llvm::Value*> args;
 		size_t i = 0;
 		for (auto& a : node.arguments) {
-			llvm::Value* v = coerce(emit(a.get()), callee->getFunctionType()->getParamType(i++));
+			llvm::Type* pt = callee->getFunctionType()->getParamType(i++);
+			// pointer parameter -> pass the address, never the dereferenced value
+			llvm::Value* v = pt->isPointerTy() ? emitRef(a.get()) : emit(a.get());
+			if (!v) return;
+			// struct passed by value but we hold its address (temporary / reference)
+			if (pt->isStructTy() && v->getType()->isPointerTy())
+				v = builder.CreateLoad(pt, v, "structarg");
+			v = coerce(v, pt);
 			if (!v) return;
 			args.push_back(v);
 		}

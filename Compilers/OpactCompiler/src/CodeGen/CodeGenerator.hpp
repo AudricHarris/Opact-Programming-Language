@@ -129,9 +129,9 @@ public:
 	void visit(MemberAccessExpr&) override;
 	void visit(CallExpr& node) override;
 	void visit(ImportExpr& node) override;
+	void visit(BorrowExpr& node) override;
 
 	// Not implemented yet
-	void visit(BorrowExpr&) override {}
 	void visit(GenericCallExpr&) override {}
 	void visit(ArrayIndexExpr&) override {}
 	void visit(ArrayLiteralExpr&) override {}
@@ -142,7 +142,12 @@ private:
 	//----------------------------------------------------------------------//
 	//  Internal data types                                                 //
 	//----------------------------------------------------------------------//
-	struct VarInfo { llvm::Value* addr; llvm::Type* type; };
+	struct VarInfo {
+		llvm::Value* addr;
+		llvm::Type* type;
+		llvm::StructType* structType = nullptr;
+		llvm::Type* pointee = nullptr; // set for references to non-struct types (what the pointer points at)
+	};
 	struct LoopTargets { llvm::BasicBlock* breakBB; llvm::BasicBlock* continueBB; };
 	struct StructInfo { llvm::StructType* type; std::vector<std::string> fieldNames; };
 
@@ -169,6 +174,7 @@ private:
 	//----------------------------------------------------------------------//
 	void error(const std::string& msg);
 	llvm::Value* emit(Expression* e);
+	llvm::Value* emitRef(Expression* e);   // address of a reference instead of its dereferenced value
 
 	void pushScope();
 	void popScope();
