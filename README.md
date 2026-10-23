@@ -1,8 +1,8 @@
-# Nexus Programming Language
+# Opact Programming Language
 
 ## Description :
 
-Nexus is designed to be a mix bitween JAVA/C# and rust.
+Opact is designed to be a mix bitween JAVA/C# and rust.
 
 It combines java/c# object oriented approach and removes the garbage collector.
 It replace the garbage collector with a ownership system similar to rust.
@@ -30,8 +30,8 @@ Will be found in lsp folder
 I initially had a compiler V1 which was a basic system to understand c++
 after rereading the code I decided to redo the compiler from scratch
 You can find both compilers :
-- NexusCompilerV1
-- NexusCompilerV2
+- NexusCompiler
+- OpactCompiler
 
 # Version logs can be found in documentation.
 
