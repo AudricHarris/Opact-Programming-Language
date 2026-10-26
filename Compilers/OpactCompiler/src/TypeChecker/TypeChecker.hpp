@@ -37,6 +37,7 @@ public:
 	void visit(Block& node) override;
 	void visit(IfExpr& node) override;
 	void visit(WhileExpr& node) override;
+	void visit(LoopExpr& node) override;
 	void visit(FunctionDeclExpr& node) override;
 	void visit(StructDeclExpr& node) override;
 	void visit(StructCreateExpr& node) override;
@@ -51,7 +52,6 @@ public:
 	// Stub out remaining ASTVisitor pure virtuals...
 	void visit(GenericCallExpr& node) override {}
 	void visit(CastExpr& node) override {}
-	void visit(LoopExpr& node) override {}
 	void visit(ArrayIndexExpr& node) override {}
 	void visit(ArrayLiteralExpr& node) override {}
 	void visit(TupleLiteralExpr& node) override {}

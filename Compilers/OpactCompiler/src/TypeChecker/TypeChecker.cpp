@@ -603,6 +603,11 @@ void TypeChecker::visit(WhileExpr& node) {
 	currentType = prim(BuiltinType::Void);
 }
 
+void TypeChecker::visit(LoopExpr& node) {
+	if (node.loopBranch) typeOf(*node.loopBranch);
+	currentType = prim(BuiltinType::Void);
+}
+
 void TypeChecker::visit(ImportExpr& node) {
 	if (!pipeline) return;
 
