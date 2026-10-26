@@ -301,7 +301,7 @@ void TypeChecker::visit(BorrowExpr& node) {
 
 	if (node.isMutable && !isWritable(*node.expr)) {
 		reportError("Cannot take a mutable reference (&mut) here: the value is behind an "
-		            "immutable reference or is not an assignable location");
+				"immutable reference or is not an assignable location");
 	}
 
 	// Re-borrowing `&r` of a reference variable still points at the original object.
@@ -491,7 +491,7 @@ void TypeChecker::visit(VarDeclExpr& node) {
 		if (isPrim(declared, BuiltinType::Void)) {
 			if (isRefType(initType))
 				reportError("Reference variable '" + tokenText(node.name) +
-				            "' needs an explicit type, e.g. &mut int " + tokenText(node.name));
+						"' needs an explicit type, e.g. &mut int " + tokenText(node.name));
 			declared = initType; // no explicit type given: infer from initializer
 		} else if (!isTypeCompatible(declared, initType.get())) {
 			reportError("Type mismatch in declaration of " + tokenText(node.name) +
@@ -637,9 +637,18 @@ void TypeChecker::visit(ImportExpr& node) {
 					scopeManager.declare(fn->name, sym);
 				}
 			}
+			else if (auto* structure = dynamic_cast<StructDeclExpr*>(expr.get())) {
+				if (structure->isPublic) {
+					if (node.isSelectiveImport && !(std::find(node.importedSymbols.begin(), node.importedSymbols.end(), structure->name) != node.importedSymbols.end())) continue;
+
+					auto structType = buildStructureType(*structure);
+					auto sym = std::make_shared<StructSymbol>(structure->name, structType);
+					scopeManager.declare(structure->name, sym);
+				}
+			}
 		}
 	}
-
+	scopeManager.dump();
 	currentType = prim(BuiltinType::Void);
 }
 

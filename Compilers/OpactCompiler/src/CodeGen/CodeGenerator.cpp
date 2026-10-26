@@ -498,27 +498,79 @@ void CodeGenerator::visit(BorrowExpr& node) {
 
 // ----- Operators ----------------------------------------------------------
 void CodeGenerator::visit(PostfixExpr& node) {
-	auto* id = dynamic_cast<IdentifierExpr*>(node.expr.get());
-	if (!id) {
-		error("++/-- requires a variable identifier");
+	llvm::Value* targetAddr = nullptr;
+	llvm::Type* targetType = nullptr;
+
+	if (auto* id = dynamic_cast<IdentifierExpr*>(node.expr.get())) {
+		VarInfo* var = lookupVar(id->name);
+		if (!var) {
+			error("Undefined variable '" + id->name + "'");
+			lastValue = nullptr;
+			return;
+		}
+
+
+		if (var->pointee) {
+			targetAddr = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_ref");
+			targetType = var->pointee;
+		}
+		else {
+			targetAddr = var->addr;
+			targetType = var->type;
+		}
+	}
+	else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.expr.get())) {
+		llvm::Value* objPtr = nullptr;
+		llvm::StructType* structTy = nullptr;
+
+		if (auto* objId = dynamic_cast<IdentifierExpr*>(ma->object.get())) {
+			VarInfo* var = lookupVar(objId->name);
+			if (!var) {
+				error("Undefined variable '" + objId->name + "'");
+				return;
+			}
+			// Handle references/pointers to structs (like function parameters `&mut Human self`)
+			if (var->type->isPointerTy() && var->structType != nullptr) {
+				objPtr = builder.CreateLoad(builder.getPtrTy(), var->addr, objId->name + "_load");
+				structTy = var->structType;
+			} else {
+				objPtr = var->addr;
+				structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
+			}
+		} else {
+			objPtr = emit(ma->object.get());
+		}
+
+		if (!structTy) {
+			error("Member access '.' is only supported on structures");
+			return;
+		}
+
+		std::string structName = structTy->getName().str();
+		auto it = structs.find(structName);
+		if (it == structs.end()) {
+			error("Unknown structure type metadata for '" + structName + "'");
+			return;
+		}
+
+		const auto& fieldNames = it->second.fieldNames;
+		auto fieldIt = std::find(fieldNames.begin(), fieldNames.end(), ma->memberName);
+		if (fieldIt == fieldNames.end()) {
+			error("Structure '" + structName + "' has no field named '" + ma->memberName + "'");
+			return;
+		}
+
+		int fieldIndex = static_cast<int>(std::distance(fieldNames.begin(), fieldIt));
+		targetAddr = builder.CreateStructGEP(structTy, objPtr, fieldIndex, ma->memberName + "_ptr");
+		targetType = structTy->getElementType(fieldIndex);
+
+	}
+	else {
+		error("++/-- requires a variable identifier or struct");
 		lastValue = nullptr;
 		return;
 	}
 
-	VarInfo* var = lookupVar(id->name);
-	if (!var) {
-		error("Undefined variable '" + id->name + "'");
-		lastValue = nullptr;
-		return;
-	}
-
-	llvm::Value* targetAddr = var->addr;
-	llvm::Type* targetType = var->type;
-
-	if (var->pointee) {
-		targetAddr = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_ref");
-		targetType = var->pointee;
-	}
 
 	llvm::Value* old = builder.CreateLoad(targetType, targetAddr, "old");
 	bool inc = node.op == PostfixOp::Increment;
@@ -551,7 +603,7 @@ void CodeGenerator::visit(UnaryExpr& node) {
 
 	if (node.op == UnaryOp::Negate) {
 		lastValue = v->getType()->isFloatingPointTy() ? builder.CreateFNeg(v, "negtmp")
-		                                              : builder.CreateNeg(v, "negtmp");
+			: builder.CreateNeg(v, "negtmp");
 	} else {
 		lastValue = builder.CreateNot(toBool(v), "nottmp");
 	}
@@ -700,7 +752,7 @@ void CodeGenerator::visit(FunctionDeclExpr& node) {
 		const auto& paramDesc = node.params[idx++];
 		const std::string& pname = paramDesc.name;
 		arg.setName(pname);
-		
+
 		llvm::AllocaInst* slot = createEntryAlloca(fn, arg.getType(), pname);
 		builder.CreateStore(&arg, slot);
 
@@ -755,8 +807,8 @@ void CodeGenerator::visit(StructCreateExpr& node) {
 		error("Only direct structure creation by name is supported");
 		return;
 	}
-	
-	
+
+
 	llvm::StructType* llvmStructTy = llvm::StructType::getTypeByName(module->getContext(), id->name);
 	if (!llvmStructTy) {
 		error("Unknown structure type '" + id->name + "'");
