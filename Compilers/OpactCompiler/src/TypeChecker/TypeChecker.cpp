@@ -658,6 +658,13 @@ void TypeChecker::visit(ImportExpr& node) {
 }
 
 
+void TypeChecker::visit(CastExpr& node) {
+	if (!node.expr) { currentType = prim(BuiltinType::Void); return; }
+
+	auto t = fromDesc(node.castType);
+	currentType = t;
+}
+
 // ---------- Assignment / ++ -- (with mutability enforcement) ----------
 
 void TypeChecker::visit(AssignExpr& node) {
