@@ -145,6 +145,25 @@ std::string TypeChecker::escapingLocal(Expression& e) {
 			if (!s.empty()) return s;
 		}
 	}
+
+	if (auto* call = dynamic_cast<CallExpr*>(&e)) {
+		auto* callee = dynamic_cast<IdentifierExpr*>(call->callee.get());
+		if (!callee) return "";
+		auto fsym = scopeManager.lookup(callee->name);
+		if (!fsym || fsym->getType()->getKind() != TypeKind::Function) return "";
+
+		auto* fn = static_cast<FunctionType*>(fsym->getType().get());
+		// A function returning plain data (int, str, ...) cannot leak a borrow.
+		if (!carriesReference(fn->getReturnType())) return "";
+
+		const auto& params = fn->getParamTypes();
+		for (size_t i = 0; i < call->arguments.size() && i < params.size(); ++i) {
+			if (!call->arguments[i] || !carriesReference(params[i])) continue;
+			std::string s = escapingLocal(*call->arguments[i]);
+			if (!s.empty()) return s;
+		}
+	}
+
 	return "";
 }
 
