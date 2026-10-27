@@ -41,6 +41,26 @@ namespace {
 	bool isRefType(const std::shared_ptr<Type>& t) {
 		return t && t->getKind() == TypeKind::Reference;
 	}
+
+	bool carriesReference(const std::shared_ptr<Type>& t) {
+		if (!t) return false;
+		if (isRefType(t)) return true;
+		if (t->getKind() == TypeKind::Struct) {
+			auto* st = static_cast<StructType*>(t.get());
+			for (const auto& f : st->getOrderedFields())
+				if (carriesReference(f.type)) return true;
+		}
+		return false;
+	}
+
+	IdentifierExpr* rootIdent(Expression* e) {
+		while (e) {
+			if (auto* id = dynamic_cast<IdentifierExpr*>(e)) return id;
+			if (auto* ma = dynamic_cast<MemberAccessExpr*>(e)) { e = ma->object.get(); continue; }
+			return nullptr;
+		}
+		return nullptr;
+	}
 } // namespace
 
 TypeChecker::TypeChecker(CompilerPipeline* pipeline, const std::string& filePath)
@@ -97,6 +117,37 @@ void TypeChecker::reportError(const std::string& message) {
 	std::cerr << "Type error: " << message << "\n";
 }
 
+std::string TypeChecker::escapingLocal(Expression& e) {
+	auto danglingOf = [&](IdentifierExpr* id) -> std::string {
+		if (!id) return "";
+		auto sym = scopeManager.lookup(id->name);
+		if (!sym) return "";
+		auto it = localInfo_.find(sym.get());
+		return it == localInfo_.end() ? "" : it->second.dangling;
+	};
+
+	if (auto* b = dynamic_cast<BorrowExpr*>(&e)) {
+		if (!b->expr) return "";
+		auto* id = rootIdent(b->expr.get());
+		if (!id) return "";
+		auto sym = scopeManager.lookup(id->name);
+		if (!sym || !localInfo_.count(sym.get())) return "";
+		if (isRefType(sym->getType())) return danglingOf(id);
+		return id->name; // borrowing a local value
+	}
+	if (auto* id = dynamic_cast<IdentifierExpr*>(&e)) return danglingOf(id);
+	if (auto* ma = dynamic_cast<MemberAccessExpr*>(&e)) return danglingOf(rootIdent(ma));
+
+	if (auto* sc = dynamic_cast<StructCreateExpr*>(&e)) {
+		for (auto& arg : sc->arguments) {
+			if (!arg) continue;
+			std::string s = escapingLocal(*arg);
+			if (!s.empty()) return s;
+		}
+	}
+	return "";
+}
+
 // ---------- Type conversion helpers ----------
 
 std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
@@ -109,17 +160,17 @@ std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
 		case DataType::Str:   baseType = prim(BuiltinType::Str);   break;
 		case DataType::Void:  baseType = prim(BuiltinType::Void);  break;
 		case DataType::Custom: {
-			std::string name = d.customTypeName;
-			if (name.empty() && d.customName) name = tokenText(*d.customName);
-			auto sym = scopeManager.lookup(name);
-			
-			if (!sym || sym->getKind() != SymbolKind::Struct) {
-				reportError("Unknown type: " + name);
-				return prim(BuiltinType::Void);
-			}
-			baseType = sym->getType();
-			break;
-		}
+								   std::string name = d.customTypeName;
+								   if (name.empty() && d.customName) name = tokenText(*d.customName);
+								   auto sym = scopeManager.lookup(name);
+
+								   if (!sym || sym->getKind() != SymbolKind::Struct) {
+									   reportError("Unknown type: " + name);
+									   return prim(BuiltinType::Void);
+								   }
+								   baseType = sym->getType();
+								   break;
+							   }
 	}
 
 	if (d.isReference) {
@@ -278,6 +329,7 @@ void TypeChecker::visit(FunctionDeclExpr& node) {
 	scopeManager.enterScope();
 	for (const auto& p : node.params) {
 		auto sym = std::make_shared<VarSymbol>(p.name, fromDesc(p.type), /*isInitialized=*/true);
+		localInfo_[sym.get()] = {};
 		if (!scopeManager.declare(p.name, sym)) {
 			reportError("Duplicate parameter '" + p.name + "' in function " + node.name);
 		}
@@ -454,6 +506,11 @@ void TypeChecker::visit(ReturnExpr& node) {
 	} else if (!isTypeCompatible(currentReturnType, valueType.get())) {
 		reportError("Return type mismatch: expected " + currentReturnType->toString() +
 				" but got " + valueType->toString());
+	} else if (node.value && *node.value && carriesReference(valueType)) {
+		std::string local = escapingLocal(**node.value);
+		if (!local.empty())
+			reportError("Cannot return a value that references local variable '" + local +
+					"': it is destroyed when the function returns");
 	}
 	currentType = prim(BuiltinType::Void);
 }
@@ -503,6 +560,11 @@ void TypeChecker::visit(VarDeclExpr& node) {
 	if (!scopeManager.declare(tokenText(node.name), sym)) {
 		reportError("Redeclaration of variable: " + tokenText(node.name));
 	}
+	std::string dangling;
+	if (node.expr && carriesReference(declared))
+		dangling = escapingLocal(*node.expr);
+	localInfo_[sym.get()] = { dangling };
+
 	currentType = declared;
 }
 

@@ -60,12 +60,17 @@ public:
 	void visit(ContinueExpr& node) override {}
 
 private:
+	struct LocalInfo {
+		std::string dangling;
+	};
+
 	CompilerPipeline* pipeline;
 	ScopeManager scopeManager;
 	std::shared_ptr<Type> currentType;
 	std::shared_ptr<Type> currentReturnType;
 	std::unordered_set<const FunctionDeclExpr*> declaredFunctions_;
 	std::unordered_set<const StructDeclExpr*> declaredStructures_;
+	std::unordered_map<const void*, LocalInfo> localInfo_;
 	std::vector<FunctionDeclExpr> persistentBuiltins_;
 	int errorCount_ = 0;
 
@@ -81,4 +86,7 @@ private:
 	void reportError(const std::string& message);
 	bool isWritable(Expression& e);
 	std::shared_ptr<Type> valueTypeOf(Expression& node);
+
+
+	std::string escapingLocal(Expression& e);
 };

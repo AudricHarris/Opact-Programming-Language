@@ -13,6 +13,8 @@ add_definitions(${LLVM_DEFINITIONS})
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
 add_executable(opact ${SOURCES})
+add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+add_link_options(-fsanitize=address,undefined)
 
 if(TARGET LLVM)
     target_link_libraries(opact PRIVATE LLVM)

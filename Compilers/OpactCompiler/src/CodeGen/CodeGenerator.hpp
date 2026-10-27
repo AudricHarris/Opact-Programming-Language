@@ -149,7 +149,13 @@ private:
 		llvm::Type* pointee = nullptr; // set for references to non-struct types (what the pointer points at)
 	};
 	struct LoopTargets { llvm::BasicBlock* breakBB; llvm::BasicBlock* continueBB; };
-	struct StructInfo { llvm::StructType* type; std::vector<std::string> fieldNames; };
+	struct StructInfo {
+		llvm::StructType* type;
+		std::vector<std::string> fieldNames;
+		std::vector<bool> fieldIsRef;
+		std::vector<llvm::Type*> fieldPointee;
+	};
+
 
 	//----------------------------------------------------------------------//
 	//  Builtins internals                                     [Builtins.cpp] //
@@ -168,6 +174,7 @@ private:
 	llvm::Value* promoteVarArg(llvm::Value* v);
 	bool         unify(llvm::Value*& l, llvm::Value*& r);
 	llvm::Value* emitBinary(BinaryOp op, llvm::Value* l, llvm::Value* r);
+	llvm::Type*  pointeeOf(const TypeDesc& d);
 
 	//----------------------------------------------------------------------//
 	//  Helpers                                             [CodeGenerator.cpp] //
@@ -187,6 +194,7 @@ private:
 
 	llvm::Function* declareFunction(FunctionDeclExpr& node);
 	void emitDefaultReturn();
+	bool emitFieldAddr(MemberAccessExpr& ma, llvm::Value*& addr, llvm::Type*& type);
 
 	static std::string tokenText(const Token& t) { return t.getWord(); }
 

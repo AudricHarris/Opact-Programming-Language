@@ -155,7 +155,16 @@ llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 			fmt += '}';
 		} else if (c == '%') {
 			fmt += "%%";
-		} else {
+		} else if (c == '\\') {
+			if (i + 1 < tmpl.size() && (tmpl[i + 1] == '{' || tmpl[i + 1] == '}')) {
+				fmt += tmpl[i + 1];
+				++i;
+			} else if (i + 1 < tmpl.size()) {
+				fmt += tmpl[i + 1];
+				++i;
+			}
+		}
+		else {
 			fmt += c;
 		}
 	}
@@ -165,7 +174,7 @@ llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 
 	llvm::Type* charPtrTy = builder.getPtrTy();
 	auto printfFn = module->getOrInsertFunction("printf",
-		llvm::FunctionType::get(builder.getInt32Ty(), { charPtrTy }, true));
+			llvm::FunctionType::get(builder.getInt32Ty(), { charPtrTy }, true));
 
 	llvm::Value* formatPtr = builder.CreateGlobalString(fmt, "fmt");
 

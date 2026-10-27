@@ -265,11 +265,16 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 	std::vector<StructureField> fields;
 	do
 	{
-		bool isMut = false;
-		if (this->check(TokenKind::MUT))
+		bool isMut = false, isRef = false;
+		if (this->check(TokenKind::AND))
 		{
-			isMut = true;
+			isRef = true;
 			this->consume();
+			if (this->check(TokenKind::MUT))
+			{
+				isMut = true;
+				this->consume();
+			}
 		}
 
 		Token ptypeTok = this->expect(TokenKind::IDENTIFIER, "Expected type for the param");
@@ -284,9 +289,11 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 		TypeDesc ptype;
 		ptype.type = determineType(ptypeTok);
 		ptype.customTypeName = ptypeTok.getWord();
-		
+		ptype.isReference = isRef;
+		ptype.isMutable = isMut;
+
 		this->consume(); // Point virgule
-		fields.emplace_back(pnameTok.getWord(), std::move(ptype), isMut, std::move(defaultVal));
+		fields.emplace_back(pnameTok.getWord(), std::move(ptype), isRef, isMut, std::move(defaultVal));
 	}
 	while (!this->match(TokenKind::RBRACE));
 

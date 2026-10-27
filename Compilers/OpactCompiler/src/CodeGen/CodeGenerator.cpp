@@ -4,7 +4,7 @@
 //  Sections:                                                               //
 //    1. Constructor                                                        //
 //    2. Type system (mapType, toBool, coerce, unify, binary operators)     //
-//    3. Helpers (errors, scopes, blocks, functions)                        //
+//    3. Helpers (errors, scopes, blocks, functions, field access)          //
 //    4. Visitors (one per AST node)                                        //
 //                                                                          //
 //  Builtins (Printf, Println, C wrappers) live in Builtins.cpp.            //
@@ -45,6 +45,15 @@ llvm::Type* CodeGenerator::mapType(const TypeDesc& d) {
 	return nullptr;
 }
 
+// For a reference type, the type the pointer points at (nullptr otherwise).
+llvm::Type* CodeGenerator::pointeeOf(const TypeDesc& d) {
+	if (!d.isReference) return nullptr;
+	TypeDesc inner = d;
+	inner.isReference = false;
+	llvm::Type* p = mapType(inner);
+	return (p && !p->isVoidTy()) ? p : nullptr;
+}
+
 // Anything -> i1 (non-zero / non-null is true).
 llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
 	if (!v) return nullptr;
@@ -55,13 +64,11 @@ llvm::Value* CodeGenerator::toBool(llvm::Value* v) {
 	return builder.CreateIsNotNull(v, "tobool"); // ints and pointers
 }
 
-// Converts v to type `to` (int widths, int<->float, float widths, ->bool, pointers).
 llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 	if (!v || !to) return nullptr;
 	llvm::Type* from = v->getType();
 	if (from == to) return v;
 
-	// If both are pointers, always allow pointer bitcast
 	if (from->isPointerTy() && to->isPointerTy())
 		return builder.CreatePointerCast(v, to, "ptrcast");
 
@@ -111,6 +118,16 @@ bool CodeGenerator::unify(llvm::Value*& l, llvm::Value*& r) {
 		r = coerce(r, wide);
 		return l && r;
 	}
+
+	if (lt->isPointerTy() && !rt->isPointerTy()) {
+		l = builder.CreateLoad(rt, l, "unref_l");
+		lt = l->getType();
+	} else if (rt->isPointerTy() && !lt->isPointerTy()) {
+		r = builder.CreateLoad(lt, r, "unref_r");
+		rt = r->getType();
+	}
+	if (lt == rt) return true;
+
 	error("Operand types do not match");
 	return false;
 }
@@ -124,7 +141,7 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 
 	// String/pointer concatenation BEFORE unify so different pointer types don't trigger errors
 	if (op == BinaryOp::Add && !lt->isFloatingPointTy() && !lt->isIntegerTy() &&
-	    !rt->isFloatingPointTy() && !rt->isIntegerTy()) {
+			!rt->isFloatingPointTy() && !rt->isIntegerTy()) {
 		auto charPtrTy = builder.getPtrTy();
 		auto sizeTy = builder.getInt64Ty();
 		auto strlenFn = module->getOrInsertFunction("strlen", llvm::FunctionType::get(sizeTy, { charPtrTy }, false));
@@ -135,10 +152,9 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 		llvm::Value* len1 = builder.CreateCall(strlenFn, { str1 }, "len1");
 		llvm::Value* len2 = builder.CreateCall(strlenFn, { str2 }, "len2");
 		llvm::Value* totalLen = builder.CreateAdd(
-			builder.CreateAdd(len1, len2, "addlen"),
-			llvm::ConstantInt::get(sizeTy, 1),
-			"totallen"
-		);
+				builder.CreateAdd(len1, len2, "addlen"),
+				llvm::ConstantInt::get(sizeTy, 1),
+				"totallen");
 		llvm::Value* dest = builder.CreateCall(mallocFn, { totalLen }, "dest");
 		builder.CreateCall(memcpyFn, { dest, str1, len1 });
 		llvm::Value* destOffset = builder.CreateInBoundsGEP(builder.getInt8Ty(), dest, { len1 }, "dest_offset");
@@ -148,6 +164,8 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 	}
 
 	if (!unify(l, r)) return nullptr;
+	lt = l->getType();
+	rt = r->getType();
 	bool fp = lt->isFloatingPointTy();
 
 	switch (op) {
@@ -160,8 +178,7 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 		case BinaryOp::Power: {
 			llvm::Type* d = builder.getDoubleTy();
 			llvm::Value* res = builder.CreateIntrinsic(llvm::Intrinsic::pow, { d },
-			                                           { coerce(l, d), coerce(r, d) }, nullptr, "powtmp");
-			std::cout << "Got Power\n";
+					{ coerce(l, d), coerce(r, d) }, nullptr, "powtmp");
 			return fp ? res : coerce(res, lt);
 		}
 
@@ -242,6 +259,68 @@ llvm::AllocaInst* CodeGenerator::createEntryAlloca(llvm::Function* fn, llvm::Typ
 	return tmp.CreateAlloca(ty, nullptr, name);
 }
 
+// Computes the address of `obj.member` and the type stored there.
+// If the field is a reference, the stored pointer is followed, so `addr`
+// is the address of the referenced object and `type` is its type.
+bool CodeGenerator::emitFieldAddr(MemberAccessExpr& ma, llvm::Value*& addr, llvm::Type*& type) {
+	llvm::Value* objPtr = nullptr;
+	llvm::StructType* structTy = nullptr;
+
+	if (auto* objId = dynamic_cast<IdentifierExpr*>(ma.object.get())) {
+		VarInfo* var = lookupVar(objId->name);
+		if (!var) {
+			error("Undefined variable '" + objId->name + "'");
+			return false;
+		}
+		// References/pointers to structs (like parameters `&mut Human self`)
+		if (var->type->isPointerTy() && var->structType != nullptr) {
+			objPtr   = builder.CreateLoad(builder.getPtrTy(), var->addr, objId->name + "_load");
+			structTy = var->structType;
+		} else {
+			objPtr   = var->addr;
+			structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
+		}
+	} else {
+		// Nested expressions: we get an address but cannot know the struct type yet.
+		objPtr = emit(ma.object.get());
+	}
+
+	if (!structTy || !objPtr) {
+		error("Member access '.' is only supported on structures");
+		return false;
+	}
+
+	std::string structName = structTy->getName().str();
+	auto it = structs.find(structName);
+	if (it == structs.end()) {
+		error("Unknown structure type metadata for '" + structName + "'");
+		return false;
+	}
+
+	const StructInfo& info = it->second;
+	auto fieldIt = std::find(info.fieldNames.begin(), info.fieldNames.end(), ma.memberName);
+	if (fieldIt == info.fieldNames.end()) {
+		error("Structure '" + structName + "' has no field named '" + ma.memberName + "'");
+		return false;
+	}
+	size_t idx = static_cast<size_t>(std::distance(info.fieldNames.begin(), fieldIt));
+
+	if (idx >= info.fieldIsRef.size() || idx >= info.fieldPointee.size()) {
+		error("Internal error: incomplete metadata for structure '" + structName + "'");
+		return false;
+	}
+
+	llvm::Value* fieldPtr = builder.CreateStructGEP(structTy, objPtr, idx, ma.memberName + "_ptr");
+	if (info.fieldIsRef[idx] && info.fieldPointee[idx]) {
+		addr = builder.CreateLoad(builder.getPtrTy(), fieldPtr, ma.memberName + "_ref");
+		type = info.fieldPointee[idx];
+	} else {
+		addr = fieldPtr;
+		type = structTy->getElementType(idx);
+	}
+	return true;
+}
+
 llvm::Function* CodeGenerator::declareFunction(FunctionDeclExpr& node) {
 	std::string name = (node.name == "Main") ? "main" : node.name;
 	if (auto* existing = module->getFunction(name)) return existing;
@@ -260,7 +339,7 @@ llvm::Function* CodeGenerator::declareFunction(FunctionDeclExpr& node) {
 	// Only `public` functions (and main) are visible to other modules;
 	// everything else gets internal linkage so it cannot be linked from outside.
 	auto linkage = (name == "main" || node.isPublic) ? llvm::Function::ExternalLinkage
-	                                                 : llvm::Function::InternalLinkage;
+		: llvm::Function::InternalLinkage;
 	auto* fnType = llvm::FunctionType::get(ret, params, false);
 	return llvm::Function::Create(fnType, linkage, name, module.get());
 }
@@ -379,19 +458,12 @@ void CodeGenerator::visit(VarDeclExpr& node) {
 	llvm::StructType* st = nullptr;
 	if (node.type.type == DataType::Custom) {
 		auto it = structs.find(node.type.customTypeName);
-		if (it != structs.end()) {
-			st = it->second.type;
-		}
+		if (it != structs.end()) st = it->second.type;
 	}
 
 	// For references to non-struct types remember what the pointer points at.
-	llvm::Type* pointee = nullptr;
-	if (node.type.isReference) {
-		TypeDesc inner = node.type;
-		inner.isReference = false;
-		llvm::Type* p = mapType(inner);
-		if (p && !p->isStructTy() && !p->isVoidTy()) pointee = p;
-	}
+	llvm::Type* pointee = pointeeOf(node.type);
+	if (pointee && pointee->isStructTy()) pointee = nullptr;
 
 	scopes.back()[name] = { slot, ty, st, pointee };
 	lastValue = initVal;
@@ -416,51 +488,9 @@ void CodeGenerator::visit(AssignExpr& node) {
 			targetPtr  = var->addr;
 			targetType = var->type;
 		}
-	} 
+	}
 	else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.target.get())) {
-		llvm::Value* objPtr = nullptr;
-		llvm::StructType* structTy = nullptr;
-
-		if (auto* objId = dynamic_cast<IdentifierExpr*>(ma->object.get())) {
-			VarInfo* var = lookupVar(objId->name);
-			if (!var) {
-				error("Undefined variable '" + objId->name + "'");
-				return;
-			}
-			// Handle references/pointers to structs (like function parameters `&mut Human self`)
-			if (var->type->isPointerTy() && var->structType != nullptr) {
-				objPtr = builder.CreateLoad(builder.getPtrTy(), var->addr, objId->name + "_load");
-				structTy = var->structType;
-			} else {
-				objPtr = var->addr;
-				structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
-			}
-		} else {
-			objPtr = emit(ma->object.get());
-		}
-
-		if (!structTy) {
-			error("Member access '.' is only supported on structures");
-			return;
-		}
-
-		std::string structName = structTy->getName().str();
-		auto it = structs.find(structName);
-		if (it == structs.end()) {
-			error("Unknown structure type metadata for '" + structName + "'");
-			return;
-		}
-
-		const auto& fieldNames = it->second.fieldNames;
-		auto fieldIt = std::find(fieldNames.begin(), fieldNames.end(), ma->memberName);
-		if (fieldIt == fieldNames.end()) {
-			error("Structure '" + structName + "' has no field named '" + ma->memberName + "'");
-			return;
-		}
-
-		int fieldIndex = static_cast<int>(std::distance(fieldNames.begin(), fieldIt));
-		targetPtr = builder.CreateStructGEP(structTy, objPtr, fieldIndex, ma->memberName + "_ptr");
-		targetType = structTy->getElementType(fieldIndex);
+		if (!emitFieldAddr(*ma, targetPtr, targetType)) return;
 	}
 	else {
 		error("Only variables or structure fields can be assigned to");
@@ -472,7 +502,7 @@ void CodeGenerator::visit(AssignExpr& node) {
 		lastValue = nullptr;
 		return;
 	}
-	
+
 	builder.CreateStore(v, targetPtr);
 	lastValue = v;
 }
@@ -498,6 +528,7 @@ void CodeGenerator::visit(BorrowExpr& node) {
 
 // ----- Operators ----------------------------------------------------------
 void CodeGenerator::visit(PostfixExpr& node) {
+	lastValue = nullptr;
 	llvm::Value* targetAddr = nullptr;
 	llvm::Type* targetType = nullptr;
 
@@ -505,72 +536,23 @@ void CodeGenerator::visit(PostfixExpr& node) {
 		VarInfo* var = lookupVar(id->name);
 		if (!var) {
 			error("Undefined variable '" + id->name + "'");
-			lastValue = nullptr;
 			return;
 		}
-
-
 		if (var->pointee) {
 			targetAddr = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_ref");
 			targetType = var->pointee;
-		}
-		else {
+		} else {
 			targetAddr = var->addr;
 			targetType = var->type;
 		}
 	}
 	else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.expr.get())) {
-		llvm::Value* objPtr = nullptr;
-		llvm::StructType* structTy = nullptr;
-
-		if (auto* objId = dynamic_cast<IdentifierExpr*>(ma->object.get())) {
-			VarInfo* var = lookupVar(objId->name);
-			if (!var) {
-				error("Undefined variable '" + objId->name + "'");
-				return;
-			}
-			// Handle references/pointers to structs (like function parameters `&mut Human self`)
-			if (var->type->isPointerTy() && var->structType != nullptr) {
-				objPtr = builder.CreateLoad(builder.getPtrTy(), var->addr, objId->name + "_load");
-				structTy = var->structType;
-			} else {
-				objPtr = var->addr;
-				structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
-			}
-		} else {
-			objPtr = emit(ma->object.get());
-		}
-
-		if (!structTy) {
-			error("Member access '.' is only supported on structures");
-			return;
-		}
-
-		std::string structName = structTy->getName().str();
-		auto it = structs.find(structName);
-		if (it == structs.end()) {
-			error("Unknown structure type metadata for '" + structName + "'");
-			return;
-		}
-
-		const auto& fieldNames = it->second.fieldNames;
-		auto fieldIt = std::find(fieldNames.begin(), fieldNames.end(), ma->memberName);
-		if (fieldIt == fieldNames.end()) {
-			error("Structure '" + structName + "' has no field named '" + ma->memberName + "'");
-			return;
-		}
-
-		int fieldIndex = static_cast<int>(std::distance(fieldNames.begin(), fieldIt));
-		targetAddr = builder.CreateStructGEP(structTy, objPtr, fieldIndex, ma->memberName + "_ptr");
-		targetType = structTy->getElementType(fieldIndex);
-
+		if (!emitFieldAddr(*ma, targetAddr, targetType)) return;
 	}
 	else {
-		error("++/-- requires a variable identifier or struct");
-		lastValue = nullptr;
+		error("++/-- requires a variable identifier or struct field");
 		return;
 	}
-
 
 	llvm::Value* old = builder.CreateLoad(targetType, targetAddr, "old");
 	bool inc = node.op == PostfixOp::Increment;
@@ -621,8 +603,11 @@ void CodeGenerator::visit(Block& node) {
 	// declaration order does not matter.
 	if (!currentFn) {
 		for (auto& e : node.expressions) {
-			if (auto* s = dynamic_cast<StructDeclExpr*>(e.get()); s && !structs.count(s->name))
-				structs[s->name] = { llvm::StructType::create(context, s->name), {} };
+			if (auto* s = dynamic_cast<StructDeclExpr*>(e.get()); s && !structs.count(s->name)) {
+				StructInfo info;
+				info.type = llvm::StructType::create(context, s->name);
+				structs[s->name] = std::move(info);
+			}
 		}
 		for (auto& e : node.expressions) {
 			if (auto* f = dynamic_cast<FunctionDeclExpr*>(e.get())) declareFunction(*f);
@@ -757,19 +742,11 @@ void CodeGenerator::visit(FunctionDeclExpr& node) {
 		builder.CreateStore(&arg, slot);
 
 		llvm::StructType* st = nullptr;
-		std::string typeName = paramDesc.type.customTypeName;
-		auto it = structs.find(typeName);
-		if (it != structs.end()) {
-			st = it->second.type;
-		}
+		auto it = structs.find(paramDesc.type.customTypeName);
+		if (it != structs.end()) st = it->second.type;
 
-		llvm::Type* pointee = nullptr;
-		if (paramDesc.type.isReference) {
-			TypeDesc inner = paramDesc.type;
-			inner.isReference = false;
-			llvm::Type* p = mapType(inner);
-			if (p && !p->isStructTy() && !p->isVoidTy()) pointee = p;
-		}
+		llvm::Type* pointee = pointeeOf(paramDesc.type);
+		if (pointee && pointee->isStructTy()) pointee = nullptr;
 
 		scopes.back()[pname] = { slot, arg.getType(), st, pointee };
 	}
@@ -786,17 +763,30 @@ void CodeGenerator::visit(FunctionDeclExpr& node) {
 
 void CodeGenerator::visit(StructDeclExpr& node) {
 	auto it = structs.find(node.name);
-	if (it == structs.end())
-		it = structs.emplace(node.name, StructInfo{ llvm::StructType::create(context, node.name), {} }).first;
+	if (it == structs.end()) {
+		StructInfo info;
+		info.type = llvm::StructType::create(context, node.name);
+		it = structs.emplace(node.name, std::move(info)).first;
+	}
+
+	// Already defined (body set): do not append the metadata twice.
+	if (!it->second.type->isOpaque()) return;
+
+	StructInfo& info = it->second;
+	info.fieldNames.clear();
+	info.fieldIsRef.clear();
+	info.fieldPointee.clear();
 
 	std::vector<llvm::Type*> fieldTypes;
 	for (const auto& f : node.attributes) {
-		llvm::Type* ft = mapType(f.type);
+		llvm::Type* ft = mapType(f.type); // reference -> ptr
 		if (!ft || ft->isVoidTy()) { error("Invalid type for field '" + f.name + "'"); return; }
 		fieldTypes.push_back(ft);
-		it->second.fieldNames.push_back(f.name);
+		info.fieldNames.push_back(f.name);
+		info.fieldIsRef.push_back(f.type.isReference);
+		info.fieldPointee.push_back(pointeeOf(f.type)); // nullptr for non-reference fields
 	}
-	if (it->second.type->isOpaque()) it->second.type->setBody(fieldTypes);
+	info.type->setBody(fieldTypes);
 }
 
 void CodeGenerator::visit(StructCreateExpr& node) {
@@ -807,83 +797,61 @@ void CodeGenerator::visit(StructCreateExpr& node) {
 		error("Only direct structure creation by name is supported");
 		return;
 	}
+	if (!currentFn) {
+		error("Structure creation outside of a function");
+		return;
+	}
 
-
-	llvm::StructType* llvmStructTy = llvm::StructType::getTypeByName(module->getContext(), id->name);
-	if (!llvmStructTy) {
+	auto it = structs.find(id->name);
+	if (it == structs.end()) {
 		error("Unknown structure type '" + id->name + "'");
+		return;
+	}
+	const StructInfo& info = it->second;
+	llvm::StructType* llvmStructTy = info.type;
+
+	if (llvmStructTy->isOpaque()) {
+		error("Structure '" + id->name + "' is used before its definition");
 		return;
 	}
 
 	if (llvmStructTy->getNumElements() != node.arguments.size()) {
-		error("Structure '" + id->name + "' expects " + 
-				std::to_string(llvmStructTy->getNumElements()) + 
+		error("Structure '" + id->name + "' expects " +
+				std::to_string(llvmStructTy->getNumElements()) +
 				" argument(s), but got " + std::to_string(node.arguments.size()));
 		return;
 	}
 
-	llvm::AllocaInst* structAlloca = builder.CreateAlloca(llvmStructTy, nullptr, id->name + "_tmp");
+	// Entry-block alloca: no stack growth when this runs inside a loop.
+	llvm::AllocaInst* structAlloca = createEntryAlloca(currentFn, llvmStructTy, id->name + "_tmp");
+	builder.CreateStore(llvm::Constant::getNullValue(llvmStructTy), structAlloca);
 
 	for (size_t i = 0; i < node.arguments.size(); ++i) {
-		llvm::Value* argVal = emit(node.arguments[i].get());
+		// Reference fields want an address, normal fields want a value.
+		bool isRef = i < info.fieldIsRef.size() && info.fieldIsRef[i];
+		llvm::Value* argVal = isRef ? emitRef(node.arguments[i].get())
+		                            : emit(node.arguments[i].get());
 		if (!argVal) return;
 
-		llvm::Value* fieldPtr = builder.CreateStructGEP(llvmStructTy, structAlloca, i, id->name + "_field_" + std::to_string(i));
+		argVal = coerce(argVal, llvmStructTy->getElementType(i));
+		if (!argVal) return;
 
+		llvm::Value* fieldPtr = builder.CreateStructGEP(llvmStructTy, structAlloca, i,
+				id->name + "_field_" + std::to_string(i));
 		builder.CreateStore(argVal, fieldPtr);
 	}
 
-	lastValue = structAlloca; 
+	lastValue = structAlloca;
 }
 
 void CodeGenerator::visit(MemberAccessExpr& node) {
 	lastValue = nullptr;
 
-	llvm::Value* objPtr = nullptr;
-	llvm::StructType* structTy = nullptr;
+	llvm::Value* addr = nullptr;
+	llvm::Type* ty = nullptr;
+	if (!emitFieldAddr(node, addr, ty)) return;
 
-	if (auto* id = dynamic_cast<IdentifierExpr*>(node.object.get())) {
-		VarInfo* var = lookupVar(id->name);
-		if (!var) {
-			error("Undefined variable '" + id->name + "'");
-			return;
-		}
-		if (var->type->isPointerTy() && var->structType != nullptr) {
-			objPtr = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_load");
-			structTy = var->structType;
-		} else {
-			objPtr = var->addr;
-			structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
-		}
-	} else {
-		objPtr = emit(node.object.get());
-	}
-
-	if (!structTy) {
-		error("Member access '.' is only supported on structures");
-		return;
-	}
-
-	std::string structName = structTy->getName().str();
-	auto it = structs.find(structName);
-	if (it == structs.end()) {
-		error("Unknown structure type metadata for '" + structName + "'");
-		return;
-	}
-
-	const auto& fieldNames = it->second.fieldNames;
-	auto fieldIt = std::find(fieldNames.begin(), fieldNames.end(), node.memberName);
-	if (fieldIt == fieldNames.end()) {
-		error("Structure '" + structName + "' has no field named '" + node.memberName + "'");
-		return;
-	}
-
-	int fieldIndex = static_cast<int>(std::distance(fieldNames.begin(), fieldIt));
-
-	llvm::Value* fieldPtr = builder.CreateStructGEP(structTy, objPtr, fieldIndex, node.memberName + "_ptr");
-	llvm::Type* fieldTy = structTy->getElementType(fieldIndex);
-
-	lastValue = builder.CreateLoad(fieldTy, fieldPtr, node.memberName + "_val");
+	lastValue = builder.CreateLoad(ty, addr, node.memberName);
 }
 
 // ----- Calls --------------------------------------------------------------

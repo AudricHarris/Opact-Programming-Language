@@ -211,11 +211,12 @@ struct CastExpr : Expression {
 struct StructureField {
 	std::string name;
 	TypeDesc type;
+	bool isReference = false;
 	bool isMutable = false;
 	std::optional<ExprPtr> defaultVal = std::nullopt;
 
-	StructureField(std::string name, TypeDesc type, bool isMutable = false, std::optional<ExprPtr> defaultVal = std::nullopt)
-		: name(std::move(name)), type(std::move(type)), isMutable(isMutable), defaultVal(std::move(defaultVal)) {}
+	StructureField(std::string name, TypeDesc type, bool isReference = false, bool isMutable = false, std::optional<ExprPtr> defaultVal = std::nullopt)
+		: name(std::move(name)), type(std::move(type)), isReference(isReference), isMutable(isMutable), defaultVal(std::move(defaultVal)) {}
 
 	// Move-only due to unique_ptr in defaultVal
 	StructureField(const StructureField&) = delete;
@@ -224,7 +225,7 @@ struct StructureField {
 	StructureField& operator=(StructureField&&) noexcept = default;
 
 	[[nodiscard]] StructureField clone() const {
-		return StructureField(name, type, isMutable, cloneOptional(defaultVal));
+		return StructureField(name, type, isReference,isMutable, cloneOptional(defaultVal));
 	}
 };
 
