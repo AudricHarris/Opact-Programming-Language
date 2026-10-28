@@ -130,11 +130,11 @@ public:
 	void visit(CallExpr& node) override;
 	void visit(ImportExpr& node) override;
 	void visit(BorrowExpr& node) override;
+	void visit(ArrayIndexExpr& node) override;
+	void visit(ArrayLiteralExpr& node) override;
 
 	// Not implemented yet
 	void visit(GenericCallExpr&) override {}
-	void visit(ArrayIndexExpr&) override {}
-	void visit(ArrayLiteralExpr&) override {}
 	void visit(TupleLiteralExpr&) override {}
 	void visit(YieldExpr&) override {}
 
@@ -174,6 +174,7 @@ private:
 	llvm::Value* promoteVarArg(llvm::Value* v);
 	bool         unify(llvm::Value*& l, llvm::Value*& r);
 	llvm::Value* emitBinary(BinaryOp op, llvm::Value* l, llvm::Value* r);
+	llvm::Value* emitLValue(Expression* e);
 	llvm::Type*  pointeeOf(const TypeDesc& d);
 
 	//----------------------------------------------------------------------//

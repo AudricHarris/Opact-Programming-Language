@@ -28,21 +28,27 @@ llvm::Type* CodeGenerator::mapType(const TypeDesc& d) {
 	if (d.isReference) {
 		return builder.getPtrTy();
 	}
+	llvm::Type* base = nullptr;
 	switch (d.type) {
-		case DataType::Int:   return builder.getInt32Ty();
-		case DataType::Float: return builder.getDoubleTy();
-		case DataType::Bool:  return builder.getInt1Ty();
-		case DataType::Char:  return builder.getInt8Ty();
-		case DataType::Str:   return builder.getPtrTy();
-		case DataType::Void:  return builder.getVoidTy();
+		case DataType::Int:   base = builder.getInt32Ty();   break;
+		case DataType::Float: base = builder.getDoubleTy();  break;
+		case DataType::Bool:  base = builder.getInt1Ty();    break;
+		case DataType::Char:  base = builder.getInt8Ty();    break;
+		case DataType::Str:   base = builder.getPtrTy();     break;
+		case DataType::Void:  base = builder.getVoidTy();    break;
 		case DataType::Custom: {
 			auto it = structs.find(d.customTypeName);
-			if (it != structs.end()) return it->second.type;
+			if (it != structs.end()) { base = it->second.type; break; }
 			error("Unknown type '" + d.customTypeName + "'");
 			return nullptr;
 		}
 	}
-	return nullptr;
+	if (!base) return nullptr;
+
+	for (auto it = d.dim.rbegin(); it != d.dim.rend(); ++it) {
+		base = llvm::ArrayType::get(base, *it);
+	}
+	return base;
 }
 
 // For a reference type, the type the pointer points at (nullptr otherwise).
@@ -198,6 +204,71 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 	return nullptr;
 }
 
+llvm::Value* CodeGenerator::emitLValue(Expression* e) {
+	if (!e) return nullptr;
+
+	// 1. Identifier (e.g., `x`)
+	if (auto* id = dynamic_cast<IdentifierExpr*>(e)) {
+		VarInfo* var = lookupVar(id->name);
+		if (!var) {
+			error("Undefined variable '" + id->name + "'");
+			return nullptr;
+		}
+		if (var->pointee || (var->structType && var->type->isPointerTy()))
+			return builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_reborrow");
+		return var->addr;
+	}
+
+	// 2. Array Index (e.g., `lstHuman[3]`)
+	if (auto* aie = dynamic_cast<ArrayIndexExpr*>(e)) {
+		if (!aie->array || aie->indices.empty()) return nullptr;
+		llvm::Value* currentPtr = nullptr;
+		llvm::Type* currentTy = nullptr;
+
+		if (auto* id = dynamic_cast<IdentifierExpr*>(aie->array.get())) {
+			VarInfo* var = lookupVar(id->name);
+			if (!var) {
+				error("Undefined variable '" + id->name + "'");
+				return nullptr;
+			}
+			currentPtr = var->addr;
+			currentTy = var->type;
+		} else {
+			currentPtr = emitRef(aie->array.get());
+		}
+
+		if (!currentPtr || !currentTy) return nullptr;
+
+		for (size_t i = 0; i < aie->indices.size(); ++i) {
+			llvm::Value* idx = emit(aie->indices[i].get());
+			if (!idx) return nullptr;
+			idx = coerce(idx, builder.getInt64Ty());
+
+			if (currentTy->isArrayTy()) {
+				llvm::ArrayType* arrTy = llvm::cast<llvm::ArrayType>(currentTy);
+				currentPtr = builder.CreateInBoundsGEP(arrTy, currentPtr, { builder.getInt64(0), idx }, "array_idx_ptr");
+				currentTy = arrTy->getElementType();
+			} else {
+				currentPtr = builder.CreateInBoundsGEP(builder.getInt8Ty(), currentPtr, { idx }, "ptr_idx_ptr");
+			}
+		}
+		return currentPtr; // Returns the pointer to the element without loading it
+	}
+
+	// 3. Member Access (e.g., `human.age`)
+	if (auto* mae = dynamic_cast<MemberAccessExpr*>(e)) {
+		llvm::Value* addr = nullptr;
+		llvm::Type* ty = nullptr;
+		if (emitFieldAddr(*mae, addr, ty)) {
+			return addr;
+		}
+		return nullptr;
+	}
+
+	error("Cannot borrow non-lvalue expression");
+	return nullptr;
+}
+
 //==========================================================================//
 //  3. Helpers                                                              //
 //==========================================================================//
@@ -272,7 +343,6 @@ bool CodeGenerator::emitFieldAddr(MemberAccessExpr& ma, llvm::Value*& addr, llvm
 			error("Undefined variable '" + objId->name + "'");
 			return false;
 		}
-		// References/pointers to structs (like parameters `&mut Human self`)
 		if (var->type->isPointerTy() && var->structType != nullptr) {
 			objPtr   = builder.CreateLoad(builder.getPtrTy(), var->addr, objId->name + "_load");
 			structTy = var->structType;
@@ -280,8 +350,21 @@ bool CodeGenerator::emitFieldAddr(MemberAccessExpr& ma, llvm::Value*& addr, llvm
 			objPtr   = var->addr;
 			structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
 		}
-	} else {
-		// Nested expressions: we get an address but cannot know the struct type yet.
+	} 
+	else if (auto* aie = dynamic_cast<ArrayIndexExpr*>(ma.object.get())) {
+		objPtr = emitLValue(aie); // Get the pointer to the struct element
+
+		if (auto* baseId = dynamic_cast<IdentifierExpr*>(aie->array.get())) {
+			VarInfo* var = lookupVar(baseId->name);
+			if (var && var->type->isArrayTy()) {
+				llvm::ArrayType* arrTy = llvm::cast<llvm::ArrayType>(var->type);
+				llvm::Type* elemTy = arrTy->getElementType();
+				structTy = llvm::dyn_cast<llvm::StructType>(elemTy);
+			}
+		}
+	}
+	else {
+		// Fallback for general expressions
 		objPtr = emit(ma.object.get());
 	}
 
@@ -412,6 +495,96 @@ void CodeGenerator::visit(LiteralExpr& node) {
 	}
 }
 
+void CodeGenerator::visit(ArrayLiteralExpr& node) {
+	lastValue = nullptr;
+	if (node.elements.empty()) {
+		error("Empty array literal not supported without explicit type");
+		return;
+	}
+
+	llvm::Value* firstVal = emit(node.elements[0].get());
+	if (!firstVal) return;
+	llvm::Type* elemTy = firstVal->getType();
+	size_t numElements = node.elements.size();
+
+	llvm::ArrayType* arrayTy = llvm::ArrayType::get(elemTy, numElements);
+	if (!currentFn) {
+		error("Array literal outside of a function");
+		return;
+	}
+
+	llvm::AllocaInst* arrayAlloca = createEntryAlloca(currentFn, arrayTy, "array_lit");
+
+	for (size_t i = 0; i < numElements; ++i) {
+		llvm::Value* val = emit(node.elements[i].get());
+		if (!val) return;
+		val = coerce(val, elemTy);
+
+		llvm::Value* elemPtr = builder.CreateInBoundsGEP(
+			arrayTy,
+			arrayAlloca,
+			{ builder.getInt64(0), builder.getInt64(i) },
+			"array_elem_ptr"
+		);
+		builder.CreateStore(val, elemPtr);
+	}
+
+	lastValue = arrayAlloca;
+}
+
+void CodeGenerator::visit(ArrayIndexExpr& node) {
+	lastValue = nullptr;
+	if (!node.array || node.indices.empty()) return;
+
+	llvm::Value* currentPtr = nullptr;
+	llvm::Type* currentTy = nullptr;
+
+	// Get the base pointer and type of the array
+	if (auto* id = dynamic_cast<IdentifierExpr*>(node.array.get())) {
+		VarInfo* var = lookupVar(id->name);
+		if (!var) {
+			error("Undefined variable '" + id->name + "'");
+			return;
+		}
+		currentPtr = var->addr; // This is the alloca pointer ([N x T]*)
+		currentTy = var->type;  // This is the array type ([N x T])
+	} else {
+		currentPtr = emitRef(node.array.get());
+		// If it's a nested expression or complex lvalue, handle accordingly
+	}
+
+	if (!currentPtr || !currentTy) {
+		error("Invalid array expression");
+		return;
+	}
+
+	// Iterate through each index dimension
+	for (size_t i = 0; i < node.indices.size(); ++i) {
+		llvm::Value* idx = emit(node.indices[i].get());
+		if (!idx) return;
+		idx = coerce(idx, builder.getInt64Ty());
+
+		if (currentTy->isArrayTy()) {
+			llvm::ArrayType* arrTy = llvm::cast<llvm::ArrayType>(currentTy);
+			// GEP for array alloca: requires {0, idx}
+			currentPtr = builder.CreateInBoundsGEP(arrTy, currentPtr, { builder.getInt64(0), idx }, "array_idx");
+			currentTy = arrTy->getElementType();
+		} else if (currentPtr->getType()->isPointerTy()) {
+			currentPtr = builder.CreateInBoundsGEP(currentTy, currentPtr, { idx }, "ptr_idx");
+		} else {
+			error("Indexing applied to non-array type");
+			return;
+		}
+	}
+
+	// Load the final value if it's a primitive/element, or return the pointer if it's a nested array
+	if (currentTy->isArrayTy()) {
+		lastValue = currentPtr;
+	} else {
+		lastValue = builder.CreateLoad(currentTy, currentPtr, "val_load");
+	}
+}
+
 void CodeGenerator::visit(IdentifierExpr& node) {
 	VarInfo* var = lookupVar(node.name);
 	if (!var) {
@@ -442,8 +615,8 @@ void CodeGenerator::visit(VarDeclExpr& node) {
 
 	llvm::Value* initVal = nullptr;
 	if (init) {
-		if (ty->isStructTy() && init->getType()->isPointerTy()) {
-			initVal = builder.CreateLoad(ty, init, "structinit");
+		if ((ty->isStructTy() || ty->isArrayTy()) && init->getType()->isPointerTy()) {
+			initVal = builder.CreateLoad(ty, init, "init_load");
 		} else {
 			initVal = coerce(init, ty);
 		}
@@ -508,22 +681,7 @@ void CodeGenerator::visit(AssignExpr& node) {
 }
 
 void CodeGenerator::visit(BorrowExpr& node) {
-	lastValue = nullptr;
-	if (auto* id = dynamic_cast<IdentifierExpr*>(node.expr.get())) {
-		VarInfo* var = lookupVar(id->name);
-		if (!var) {
-			error("Undefined variable '" + id->name + "'");
-			return;
-		}
-		// Re-borrowing a reference yields the address it already holds,
-		// not the address of the slot that stores the pointer.
-		if (var->pointee || (var->structType && var->type->isPointerTy()))
-			lastValue = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_reborrow");
-		else
-			lastValue = var->addr; // address of the variable being borrowed
-	} else {
-		error("Cannot borrow non-lvalue expression");
-	}
+	lastValue = emitLValue(node.expr.get());
 }
 
 // ----- Operators ----------------------------------------------------------
@@ -847,6 +1005,33 @@ void CodeGenerator::visit(StructCreateExpr& node) {
 void CodeGenerator::visit(MemberAccessExpr& node) {
 	lastValue = nullptr;
 
+	if (node.memberName == "length") {
+		// Check if it's an array type
+		llvm::Type* arrTy = nullptr;
+		if (auto* id = dynamic_cast<IdentifierExpr*>(node.object.get())) {
+			VarInfo* var = lookupVar(id->name);
+			if (var) arrTy = var->type;
+		}
+
+		if (arrTy && arrTy->isArrayTy()) {
+			uint64_t len = llvm::cast<llvm::ArrayType>(arrTy)->getNumElements();
+			lastValue = builder.getInt32(static_cast<uint32_t>(len));
+			return;
+		}
+
+		// Check if it's a string type (emits a runtime strlen call)
+		llvm::Value* objVal = emit(node.object.get());
+		if (objVal && objVal->getType()->isPointerTy()) {
+			auto sizeTy = builder.getInt64Ty();
+			auto strlenFn = module->getOrInsertFunction("strlen", llvm::FunctionType::get(sizeTy, { builder.getPtrTy() }, false));
+			llvm::Value* strPtr = builder.CreatePointerCast(objVal, builder.getPtrTy(), "str_cast");
+			llvm::Value* len64 = builder.CreateCall(strlenFn, { strPtr }, "strlen_tmp");
+			lastValue = builder.CreateTrunc(len64, builder.getInt32Ty(), "len_i32");
+			return;
+		}
+	}
+
+	// Fallback to regular structure field access
 	llvm::Value* addr = nullptr;
 	llvm::Type* ty = nullptr;
 	if (!emitFieldAddr(node, addr, ty)) return;

@@ -488,6 +488,13 @@ void TypeChecker::visit(MemberAccessExpr &node)
 		baseType = static_cast<const ReferenceType*>(baseType.get())->getInnerType();
 	}
 
+	if (baseType->getKind() == TypeKind::Array || isPrim(baseType, BuiltinType::Str)) {
+		if (node.memberName == "length") {
+			currentType = prim(BuiltinType::Int);
+			return;
+		}
+	}
+
 	if (baseType->getKind() != TypeKind::Struct) {
 		reportError(node.line, node.col, "Member access '.' applied to non-structure type");
 		currentType = prim(BuiltinType::Void);
