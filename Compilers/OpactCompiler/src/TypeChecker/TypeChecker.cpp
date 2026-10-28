@@ -4,6 +4,7 @@
 #include "Symbol/FunctionSymbol.hpp"
 #include "Symbol/StructSymbol.hpp"
 #include "Symbol/VarSymbol.hpp"
+#include "Types/ArrayType.hpp"
 #include "Types/PrimitiveType.hpp"
 #include "Types/ReferenceType.hpp"
 #include "Types/StructType.hpp"
@@ -213,17 +214,24 @@ std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
 		case DataType::Str:   baseType = prim(BuiltinType::Str);   break;
 		case DataType::Void:  baseType = prim(BuiltinType::Void);  break;
 		case DataType::Custom: {
-								   std::string name = d.customTypeName;
-								   if (name.empty() && d.customName) name = tokenText(*d.customName);
-								   auto sym = scopeManager.lookup(name);
+			std::string name = d.customTypeName;
+			if (name.empty() && d.customName) name = tokenText(*d.customName);
+			auto sym = scopeManager.lookup(name);
 
-								   if (!sym || sym->getKind() != SymbolKind::Struct) {
-									   reportError("Unknown type: " + name);
-									   return prim(BuiltinType::Void);
-								   }
-								   baseType = sym->getType();
-								   break;
-							   }
+			if (!sym || sym->getKind() != SymbolKind::Struct) {
+				reportError("Unknown type: " + name);
+				return prim(BuiltinType::Void);
+			}
+			baseType = sym->getType();
+			break;
+		}
+	}
+
+	// Wrap in ArrayType if dimensions are present (e.g. i32[5])
+	if (!d.dim.empty()) {
+		for (auto it = d.dim.rbegin(); it != d.dim.rend(); ++it) {
+			baseType = std::make_shared<ArrayType>(baseType, *it);
+		}
 	}
 
 	if (d.isReference) {
@@ -251,10 +259,26 @@ TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
 			d.type = DataType::Custom;
 			d.customTypeName = static_cast<const StructType*>(type.get())->getName();
 			break;
+		case TypeKind::Array: {
+			auto* arrType = static_cast<const ArrayType*>(type.get());
+			d.dim.push_back(arrType->getArrayLength());
+			// Unroll multi-dimensional arrays if nested
+			auto inner = arrType->getElementType();
+			while (inner->getKind() == TypeKind::Array) {
+				auto* innerArr = static_cast<const ArrayType*>(inner.get());
+				d.dim.push_back(innerArr->getArrayLength());
+				inner = innerArr->getElementType();
+			}
+			TypeDesc innerDesc = toDesc(inner);
+			d.type = innerDesc.type;
+			d.customName = innerDesc.customName;
+			d.customTypeName = innerDesc.customTypeName;
+			break;
+		}
 		case TypeKind::Function:
 			d.type = DataType::Void;
 			break;
-		case TypeKind::Reference:
+		case TypeKind::Reference: {
 			auto* refType = static_cast<const ReferenceType*>(type.get());
 			d.isReference = true;
 			d.isMutable = refType->isMutable();
@@ -265,6 +289,7 @@ TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
 			d.customTypeName = innerDesc.customTypeName;
 			d.dim = innerDesc.dim;
 			break;
+		}
 	}
 	return d;
 }
@@ -561,6 +586,56 @@ void TypeChecker::visit(LiteralExpr& node) {
 		case LiteralKind::Char:  currentType = prim(BuiltinType::Char);  break;
 		case LiteralKind::Str:   currentType = prim(BuiltinType::Str);   break;
 	}
+}
+
+void TypeChecker::visit(ArrayLiteralExpr& node) {
+	if (node.elements.empty()) {
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+	auto elementType = valueTypeOf(*node.elements[0]);
+	for (size_t i = 1; i < node.elements.size(); ++i) {
+		auto elemT = valueTypeOf(*node.elements[i]);
+		if (!elementType->equals(elemT.get())) {
+			reportError(node.line, node.col, "Mismatched types in array literal");
+		}
+	}
+	currentType = std::make_shared<ArrayType>(elementType, node.elements.size());
+}
+
+void TypeChecker::visit(ArrayIndexExpr& node) {
+	if (!node.array) {
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto currentExprType = typeOf(*node.array);
+	if (isRefType(currentExprType)) {
+		currentExprType = static_cast<const ReferenceType*>(currentExprType.get())->getInnerType();
+	}
+
+	// Iterate through each index in the vector (supports multi-dimensional indexing)
+	for (size_t i = 0; i < node.indices.size(); ++i) {
+		if (currentExprType->getKind() != TypeKind::Array) {
+			reportError(node.line, node.col, "Indexing applied to non-array type: " + currentExprType->toString());
+			currentType = prim(BuiltinType::Void);
+			return;
+		}
+
+		auto* arr = static_cast<const ArrayType*>(currentExprType.get());
+
+		if (node.indices[i]) {
+			auto indexType = valueTypeOf(*node.indices[i]);
+			if (!isPrim(indexType, BuiltinType::Int)) {
+				reportError(node.line, node.col, "Array index must be an integer, got " + indexType->toString());
+			}
+		}
+
+		// Advance to the inner type for the next dimension
+		currentExprType = arr->getElementType();
+	}
+
+	currentType = currentExprType;
 }
 
 void TypeChecker::visit(IdentifierExpr& node) {

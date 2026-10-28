@@ -6,7 +6,8 @@ enum class TypeKind {
 	Primitive,
 	Function,
 	Struct,
-	Reference
+	Reference,
+	Array
 };
 
 class Type {

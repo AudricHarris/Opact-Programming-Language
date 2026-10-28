@@ -49,11 +49,11 @@ public:
 	void visit(AssignExpr& node) override;
 	void visit(PostfixExpr& node) override;
 	void visit(CastExpr& node) override;
+	void visit(ArrayLiteralExpr& node) override;
+	void visit(ArrayIndexExpr& node) override;
 
 	// Stub out remaining ASTVisitor pure virtuals...
 	void visit(GenericCallExpr& node) override {}
-	void visit(ArrayIndexExpr& node) override {}
-	void visit(ArrayLiteralExpr& node) override {}
 	void visit(TupleLiteralExpr& node) override {}
 	void visit(YieldExpr& node) override {}
 	void visit(BreakExpr& node) override {}
