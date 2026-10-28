@@ -1,6 +1,6 @@
 // TypeChecker.hpp
 #pragma once
-
+#include <fstream>
 #include "../Parser/Ast.hpp"
 #include "Scope/ScopeManager.hpp"
 #include "Types/Type.hpp"
@@ -83,6 +83,7 @@ private:
 	void declareStructures(const StructDeclExpr& structure);
 
 	void declareBuiltins();
+	void reportError(size_t line, size_t col, const std::string& primaryMsg, const std::string& note = "");
 	void reportError(const std::string& message);
 	bool isWritable(Expression& e);
 	std::shared_ptr<Type> valueTypeOf(Expression& node);

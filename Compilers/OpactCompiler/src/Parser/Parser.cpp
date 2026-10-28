@@ -112,6 +112,14 @@ void Parser::synchronize() {
 //-- Parsing module --//
 //--------------------//
 
+template<typename T, typename... Args>
+ExprPtr makeNode(const Token& tok, Args&&... args) {
+	auto node = std::make_unique<T>(std::forward<Args>(args)...);
+	node->line = tok.getLine();
+	node->col = tok.getColumn();
+	return node;
+}
+
 ExprPtr Parser::parseModule()
 {
 	auto moduleBlock = std::make_unique<Block>();
@@ -215,7 +223,7 @@ ExprPtr Parser::parseImport()
 
 	this->addModule(path.segments);
 	this->expect(TokenKind::SEMI, "Expected ';' after import");
-	return std::make_unique<ImportExpr>(std::move(path), std::move(importedSymbols), isSelective);
+	return makeNode<ImportExpr>(first, std::move(path), std::move(importedSymbols), isSelective);
 }
 
 DataType determineType(const Token& t)
@@ -297,7 +305,7 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 	}
 	while (!this->match(TokenKind::RBRACE));
 
-	return std::make_unique<StructDeclExpr>(std::move(name), std::move(fields), isPublic);
+	return makeNode<StructDeclExpr>(nameTok, std::move(name), std::move(fields), isPublic);
 }
 
 //----------------------//
@@ -395,7 +403,8 @@ ExprPtr Parser::parseFunction(std::optional<Token> visib)
 
 	ExprPtr body = this->parseBlock();
 
-	return std::make_unique<FunctionDeclExpr>(
+	return makeNode<FunctionDeclExpr>(
+			nameTok,
 			std::move(name),
 			std::move(params),
 			std::move(returnType),
@@ -471,13 +480,13 @@ ExprPtr Parser::parseExpression()
 		return this->parseLoop();
 
 	if (this->check(TokenKind::BREAK)) {
-		this->consume();
-		return std::make_unique<BreakExpr>();
+		Token tok = this->consume();
+		return makeNode<BreakExpr>(tok);
 	}
 
 	if (this->check(TokenKind::CONTINUE)) {
-		this->consume();
-		return std::make_unique<ContinueExpr>();
+		Token tok = this->consume();
+		return makeNode<ContinueExpr>(tok);
 	}
 
 	if (this->check(TokenKind::AND)) {
@@ -499,6 +508,7 @@ ExprPtr Parser::parseExpression()
 
 ExprPtr Parser::parseIf()
 {
+	Token tok = this->peek();
 	this->expect(TokenKind::IF, "Expected 'if' at the start of an if expression");
 	this->expect(TokenKind::LPAREN, "Expected '(' for opening condition");
 	ExprPtr condition = this->parseExpression();
@@ -515,7 +525,7 @@ ExprPtr Parser::parseIf()
 		}
 	}
 
-	return std::make_unique<IfExpr>(std::move(condition), std::move(ifBranch), std::move(elseBranch));
+	return makeNode<IfExpr>(tok, std::move(condition), std::move(ifBranch), std::move(elseBranch));
 }
 
 //------------------------------//
@@ -524,6 +534,7 @@ ExprPtr Parser::parseIf()
 
 ExprPtr Parser::parseWhile()
 {
+	Token tok = this->peek();
 	this->expect(TokenKind::WHILE, "Expected 'while' at the start of a while expression");
 	this->expect(TokenKind::LPAREN, "Expected '(' for opening condition");
 	ExprPtr condition = this->parseExpression();
@@ -531,15 +542,16 @@ ExprPtr Parser::parseWhile()
 
 	ExprPtr loopBranch = this->parseBlock(); 
 
-	return std::make_unique<WhileExpr>(std::move(condition), std::move(loopBranch));
+	return makeNode<WhileExpr>(tok, std::move(condition), std::move(loopBranch));
 }
 
 
 ExprPtr Parser::parseLoop()
 {
+	Token tok = this->peek();
 	this->expect(TokenKind::LOOP, "Expected 'loop' keyword");
 	ExprPtr body = this->parseBlock();
-	return std::make_unique<LoopExpr>(std::move(body));
+	return makeNode<LoopExpr>(tok, std::move(body));
 }
 
 //---------------------//
@@ -548,7 +560,7 @@ ExprPtr Parser::parseLoop()
 
 ExprPtr Parser::parseCallExpr(ExprPtr callee)
 {
-	this->expect(TokenKind::LPAREN, "Expected '(' for function call");
+	Token tok = this->peekAt(-2);
 	std::vector<ExprPtr> args;
 
 	if (!this->check(TokenKind::RPAREN)) {
@@ -559,7 +571,7 @@ ExprPtr Parser::parseCallExpr(ExprPtr callee)
 
 	this->expect(TokenKind::RPAREN, "Expected ')' after function arguments");
 
-	return std::make_unique<CallExpr>(std::move(callee), std::move(args));
+	return makeNode<CallExpr>(tok ,std::move(callee), std::move(args));
 }
 
 //-------------------------//
@@ -568,13 +580,14 @@ ExprPtr Parser::parseCallExpr(ExprPtr callee)
 
 ExprPtr Parser::parseReturn()
 {
+	Token tok = this->peek();
 	this->consume(); // consume TokenKind::RETURN
 	std::optional<ExprPtr> value = std::nullopt;
 
 	if (!this->check(TokenKind::SEMI))
 		value = this->parseExpression();
 
-	return std::make_unique<ReturnExpr>(std::move(value));
+	return makeNode<ReturnExpr>(tok, std::move(value));
 }
 
 //---------------------------//
@@ -583,6 +596,7 @@ ExprPtr Parser::parseReturn()
 
 ExprPtr Parser::parseVarDecl()
 {
+	Token startTok = this->peek();
 	TypeDesc desc;
 
 	// Handle reference types like &mut i32 t
@@ -610,17 +624,18 @@ ExprPtr Parser::parseVarDecl()
 		initExpr = this->parseExpression();
 	}
 
-	return std::make_unique<VarDeclExpr>(nameTok, std::move(desc), std::move(initExpr));
+	return makeNode<VarDeclExpr>(startTok, nameTok, std::move(desc), std::move(initExpr));
 }
 
 ExprPtr Parser::parseBorrow()
 {
+	Token tok = this->peek();
 	this->consume(); // Removal of &
 	bool isMut = this->match(TokenKind::MUT); 
 
 	auto expr = this->parseExpression();
 
-	return std::make_unique<BorrowExpr>(std::move(expr), isMut);
+	return makeNode<BorrowExpr>(tok, std::move(expr), isMut);
 
 }
 
@@ -632,16 +647,16 @@ ExprPtr Parser::parseAssignement()
 
 	switch (symbolAssign.getKind()) {
 		case TokenKind::ASSIGN: {
-									this->consume();
+									Token assignTok = this->consume();
 									ExprPtr val = this->parseAssignement();
-									return std::make_unique<AssignExpr>(std::move(target), std::move(val), AssignKind::Assign);
+									return makeNode<AssignExpr>(assignTok, std::move(target), std::move(val), AssignKind::Assign);
 								}
 
 		case TokenKind::ADD_ASSIGN:
 		case TokenKind::SUB_ASSIGN:
 		case TokenKind::MUL_ASSIGN:
 		case TokenKind::DIV_ASSIGN: {
-										this->consume();
+										Token opTok = this->consume();
 
 										BinaryOp op;
 										switch (symbolAssign.getKind()) {
@@ -655,7 +670,7 @@ ExprPtr Parser::parseAssignement()
 										ExprPtr val = this->parseAssignement();
 
 										ExprPtr rhs = std::make_unique<BinaryExpr>(op, target->clone(), std::move(val));
-										return std::make_unique<AssignExpr>(std::move(target), std::move(rhs), AssignKind::Assign); // <-- Ensured this returns
+										return makeNode<AssignExpr>(opTok, std::move(target), std::move(rhs), AssignKind::Assign); 
 									}
 
 		default:
@@ -826,15 +841,7 @@ ExprPtr Parser::parsePostfix(ExprPtr expr)
 
 		// 3. Function Call
 		if (this->match(TokenKind::LPAREN)) {
-			std::vector<ExprPtr> args;
-			if (!this->check(TokenKind::RPAREN)) {
-				do {
-					args.push_back(this->parseExpression());
-				} while (this->match(TokenKind::COMMA));
-			}
-			this->expect(TokenKind::RPAREN, "Expected ')' after function arguments");
-
-			expr = std::make_unique<CallExpr>(std::move(expr), std::move(args));
+			expr = this->parseCallExpr(std::move(expr));
 			continue;
 		}
 		// 4. Structure/Class defining

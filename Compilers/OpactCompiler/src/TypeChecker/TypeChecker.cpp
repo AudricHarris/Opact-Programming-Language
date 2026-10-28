@@ -9,6 +9,7 @@
 #include "Types/StructType.hpp"
 #include "Types/Type.hpp"
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -111,10 +112,43 @@ void TypeChecker::declareBuiltins() {
 	}
 }
 
-void TypeChecker::reportError(const std::string& message) {
+static std::string getSourceLine(const std::string& filePath, size_t lineNumber) {
+	std::ifstream file(filePath);
+	std::string line;
+	size_t current = 1;
+	while (std::getline(file, line)) {
+		if (current == lineNumber) return line;
+		current++;
+	}
+	return "";
+}
+
+void TypeChecker::reportError(size_t line, size_t col, const std::string& primaryMsg, const std::string& note) {
 	++errorCount_;
 	this->correctCode = false;
-	std::cerr << "Type error: " << message << "\n";
+
+	std::cerr << "\033[1;31mOpacity Error\033[0m: " << primaryMsg << "\n";
+	if (line > 0) {
+		std::cerr << "  --> " << currentFilePath << ":" << line << ":" << col << "\n";
+
+		std::string sourceLine = getSourceLine(currentFilePath, line);
+		if (!sourceLine.empty()) {
+			std::cerr << "   |\n";
+			std::cerr << line << " ==> " << sourceLine << "\n";
+
+			std::string indent(col > 0 ? col - 1 : 0, ' ');
+			std::cerr << "   | " << indent << "\033[1;31m^\033[0m\n";
+		}
+	}
+
+	if (!note.empty()) {
+		std::cerr << "   |     \033[1;36mNOTE:\033[0m " << note << "\n";
+	}
+	std::cerr << "\n";
+}
+
+void TypeChecker::reportError(const std::string& message) {
+	reportError(0, 0, message, "");
 }
 
 std::string TypeChecker::escapingLocal(Expression& e) {
@@ -218,7 +252,6 @@ TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
 			d.customTypeName = static_cast<const StructType*>(type.get())->getName();
 			break;
 		case TypeKind::Function:
-			// TypeDesc cannot describe function types; Void is the fallback.
 			d.type = DataType::Void;
 			break;
 		case TypeKind::Reference:
@@ -237,25 +270,19 @@ TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
 }
 
 std::shared_ptr<Type> TypeChecker::typeOf(Expression& node) {
-	currentType = prim(BuiltinType::Void); // never leak a stale result
+	currentType = prim(BuiltinType::Void); 
 	node.accept(*this);
 	return currentType ? currentType : prim(BuiltinType::Void);
 }
 
-// Type of `node` when used as a value: references are dereferenced.
 std::shared_ptr<Type> TypeChecker::valueTypeOf(Expression& node) {
 	return stripRef(typeOf(node));
 }
 
-// Can the location denoted by `e` be written to?
-//   x          -> plain variable: yes;  reference variable: only if `&mut`
-//   x.a.b      -> writable iff the root `x` is (a `&` reference makes it read-only)
-//   anything else (literals, arithmetic, ...) is not an assignable location,
-//   except a call returning `&mut T`, which is handled via its type.
 bool TypeChecker::isWritable(Expression& e) {
 	if (auto* id = dynamic_cast<IdentifierExpr*>(&e)) {
 		auto sym = scopeManager.lookup(id->name);
-		if (!sym) return true; // "undeclared identifier" is reported elsewhere
+		if (!sym) return true; 
 		auto ty = sym->getType();
 		if (isRefType(ty)) return static_cast<const ReferenceType*>(ty.get())->isMutable();
 		return true;
@@ -296,7 +323,7 @@ std::shared_ptr<StructType> TypeChecker::buildStructureType(const StructDeclExpr
 
 		size_t fieldOffset = currentOffset;
 
-		structure->addField(att.name, fieldType, fieldOffset); // <-- Register the field here!
+		structure->addField(att.name, fieldType, fieldOffset); 
 
 		currentOffset += fieldType->getSize();
 	}
@@ -309,7 +336,7 @@ std::shared_ptr<StructType> TypeChecker::buildStructureType(const StructDeclExpr
 void TypeChecker::declareFunction(const FunctionDeclExpr& fn) {
 	auto sym = std::make_shared<FunctionSymbol>(fn.name, buildFunctionType(fn));
 	if (!scopeManager.declare(fn.name, sym)) {
-		reportError("Redeclaration of function: " + fn.name);
+		reportError(fn.line, fn.col, "Redeclaration of function: " + fn.name);
 	}
 	declaredFunctions_.insert(&fn);
 }
@@ -317,7 +344,7 @@ void TypeChecker::declareFunction(const FunctionDeclExpr& fn) {
 void TypeChecker::declareStructures(const StructDeclExpr& structures) {
 	auto sym = std::make_shared<StructSymbol>(structures.name, buildStructureType(structures));
 	if (!scopeManager.declare(structures.name, sym)) {
-		reportError("Redeclaration of structure: " + structures.name);
+		reportError(structures.line, structures.col, "Redeclaration of structure: " + structures.name);
 	}
 	declaredStructures_.insert(&structures);
 }
@@ -325,7 +352,6 @@ void TypeChecker::declareStructures(const StructDeclExpr& structures) {
 void TypeChecker::initialize(const ExprPtr& m) {
 	if (!m) return;
 
-	// Hoist top-level functions into the global scope
 	if (auto* block = dynamic_cast<Block*>(m.get())) {
 		for (const auto& expr : block->expressions) {
 			if (auto* fn = dynamic_cast<FunctionDeclExpr*>(expr.get())) {
@@ -342,7 +368,6 @@ void TypeChecker::initialize(const ExprPtr& m) {
 }
 
 void TypeChecker::visit(FunctionDeclExpr& node) {
-	// Already hoisted by initialize()? Otherwise (nested function) declare now.
 	if (!declaredFunctions_.count(&node)) declareFunction(node);
 
 	scopeManager.enterScope();
@@ -350,7 +375,7 @@ void TypeChecker::visit(FunctionDeclExpr& node) {
 		auto sym = std::make_shared<VarSymbol>(p.name, fromDesc(p.type), /*isInitialized=*/true);
 		localInfo_[sym.get()] = {};
 		if (!scopeManager.declare(p.name, sym)) {
-			reportError("Duplicate parameter '" + p.name + "' in function " + node.name);
+			reportError(node.line, node.col, "Duplicate parameter '" + p.name + "' in function " + node.name);
 		}
 	}
 
@@ -371,11 +396,9 @@ void TypeChecker::visit(BorrowExpr& node) {
 	auto innerType = typeOf(*node.expr);
 
 	if (node.isMutable && !isWritable(*node.expr)) {
-		reportError("Cannot take a mutable reference (&mut) here: the value is behind an "
-				"immutable reference or is not an assignable location");
+		reportError(node.line, node.col, "Cannot take a mutable reference (&mut) here: the value is behind an immutable reference or is not an assignable location");
 	}
 
-	// Re-borrowing `&r` of a reference variable still points at the original object.
 	currentType = std::make_shared<ReferenceType>(stripRef(innerType), node.isMutable);
 }
 
@@ -387,7 +410,7 @@ void TypeChecker::visit(StructDeclExpr& node) {
 	for (const auto& p : node.attributes) {
 		auto sym = std::make_shared<VarSymbol>(p.name, fromDesc(p.type), /*isInitialized=*/true);
 		if (!scopeManager.declare(p.name, sym)) {
-			reportError("Duplicate Attribute '" + p.name + "' in structure " + node.name);
+			reportError(node.line, node.col, "Duplicate Attribute '" + p.name + "' in structure " + node.name);
 		}
 	}
 
@@ -406,27 +429,25 @@ void TypeChecker::visit(StructCreateExpr& node)
 	}
 
 	if (structType->getKind() != TypeKind::Struct) {
-		reportError("Called expression is not a structure");
+		reportError(node.line, node.col, "Called expression is not a structure");
 		currentType = prim(BuiltinType::Void);
 		return;
 	}
 
 	auto* strct = static_cast<StructType*>(structType.get());
-	const auto& fields = strct->getOrderedFields(); // Uses declaration order
+	const auto& fields = strct->getOrderedFields(); 
 
 	if (fields.size() != argTypes.size()) {
-		reportError("Expected " + std::to_string(fields.size()) + " argument(s) but got " +
-				std::to_string(argTypes.size()));
+		reportError(node.line, node.col, "Expected " + std::to_string(fields.size()) + " argument(s) but got " + std::to_string(argTypes.size()));
 	} else {
 		for (size_t i = 0; i < fields.size(); ++i) {
 			if (!fields[i].type->equals(argTypes[i].get())) {
-				reportError("Argument " + std::to_string(i + 1) + " ('" + fields[i].name + "'): expected " +
-						fields[i].type->toString() + " but got " + argTypes[i]->toString());
+				reportError(node.line, node.col, "Argument " + std::to_string(i + 1) + " ('" + fields[i].name + "'): expected " + fields[i].type->toString() + " but got " + argTypes[i]->toString());
 			}
 		}
 	}
 
-	currentType = structType; // Evaluates to the instance type of the structure
+	currentType = structType; 
 }
 
 void TypeChecker::visit(MemberAccessExpr &node)
@@ -438,13 +459,12 @@ void TypeChecker::visit(MemberAccessExpr &node)
 
 	auto baseType = typeOf(*node.object);
 
-	// Auto-dereference if the object is a reference to a struct
 	if (baseType->getKind() == TypeKind::Reference) {
 		baseType = static_cast<const ReferenceType*>(baseType.get())->getInnerType();
 	}
 
 	if (baseType->getKind() != TypeKind::Struct) {
-		reportError("Member access '.' applied to non-structure type");
+		reportError(node.line, node.col, "Member access '.' applied to non-structure type");
 		currentType = prim(BuiltinType::Void);
 		return;
 	}
@@ -453,7 +473,7 @@ void TypeChecker::visit(MemberAccessExpr &node)
 	const auto* field = strct->getField(node.memberName);
 
 	if (!field) {
-		reportError("Structure '" + strct->getName() + "' has no member named '" + node.memberName + "'");
+		reportError(node.line, node.col, "Structure '" + strct->getName() + "' has no member named '" + node.memberName + "'");
 		currentType = prim(BuiltinType::Void);
 		return;
 	}
@@ -461,17 +481,14 @@ void TypeChecker::visit(MemberAccessExpr &node)
 	currentType = field->type;
 }
 
-
 bool isTypeCompatible(const std::shared_ptr<Type>& expected, const Type* actual) {
 	if (!expected || !actual) return false;
 
-	// Checked BEFORE equals(): we cannot rely on Type::equals comparing mutability.
 	if (expected->getKind() == TypeKind::Reference && actual->getKind() == TypeKind::Reference) {
 		auto* expRef = static_cast<const ReferenceType*>(expected.get());
 		auto* actRef = static_cast<const ReferenceType*>(actual);
 
 		if (!expRef->getInnerType()->equals(actRef->getInnerType().get())) return false;
-		// &mut T -> &T is fine, &T -> &mut T is not
 		return !expRef->isMutable() || actRef->isMutable();
 	}
 	return expected->equals(actual);
@@ -488,7 +505,7 @@ void TypeChecker::visit(CallExpr& node) {
 	}
 
 	if (calleeType->getKind() != TypeKind::Function) {
-		reportError("Called expression is not a function");
+		reportError(node.line, node.col, "Called expression is not a function");
 		currentType = prim(BuiltinType::Void);
 		return;
 	}
@@ -497,15 +514,12 @@ void TypeChecker::visit(CallExpr& node) {
 	const auto& params = fn->getParamTypes();
 
 	if (params.size() != argTypes.size()) {
-		reportError("Expected " + std::to_string(params.size()) + " argument(s) but got " +
-				std::to_string(argTypes.size()));
+		reportError(node.line, node.col, "Expected " + std::to_string(params.size()) + " argument(s) but got " + std::to_string(argTypes.size()));
 	} else {
 		for (size_t i = 0; i < params.size(); ++i) {
-			// Use isTypeCompatible instead of strict equals
 			auto actual = isRefType(params[i]) ? argTypes[i] : stripRef(argTypes[i]);
 			if (!isTypeCompatible(params[i], actual.get())) {
-				reportError("Argument " + std::to_string(i + 1) + ": expected " +
-						params[i]->toString() + " but got " + argTypes[i]->toString());
+				reportError(node.line, node.col, "Argument " + std::to_string(i + 1) + ": expected " + params[i]->toString() + " but got " + argTypes[i]->toString());
 			}
 		}
 	}
@@ -521,15 +535,18 @@ void TypeChecker::visit(ReturnExpr& node) {
 	}
 
 	if (!currentReturnType) {
-		reportError("'return' outside of a function");
+		reportError(node.line, node.col, "'return' outside of a function");
 	} else if (!isTypeCompatible(currentReturnType, valueType.get())) {
-		reportError("Return type mismatch: expected " + currentReturnType->toString() +
-				" but got " + valueType->toString());
+		reportError(node.line, node.col, "Return type mismatch: expected " + currentReturnType->toString() + " but got " + valueType->toString());
 	} else if (node.value && *node.value && carriesReference(valueType)) {
 		std::string local = escapingLocal(**node.value);
 		if (!local.empty())
-			reportError("Cannot return a value that references local variable '" + local +
-					"': it is destroyed when the function returns");
+			reportError(
+					node.line, 
+					node.col, 
+					"cannot return a value that references local variable '" + local + "'",
+					"local variable created here, but its scope ends when function returns."
+					);
 	}
 	currentType = prim(BuiltinType::Void);
 }
@@ -549,7 +566,7 @@ void TypeChecker::visit(LiteralExpr& node) {
 void TypeChecker::visit(IdentifierExpr& node) {
 	auto symbol = scopeManager.lookup(node.name);
 	if (!symbol) {
-		reportError("Undeclared identifier: " + node.name);
+		reportError(node.line, node.col, "Undeclared identifier: " + node.name);
 		currentType = prim(BuiltinType::Void);
 		return;
 	}
@@ -560,24 +577,20 @@ void TypeChecker::visit(VarDeclExpr& node) {
 	auto declared = fromDesc(node.type);
 
 	if (node.expr) {
-		// A reference is kept as a reference only if the variable is declared as
-		// one (or the initializer is an explicit borrow); otherwise it is read as a value.
 		bool keepRef = node.type.isReference || dynamic_cast<BorrowExpr*>(node.expr.get());
 		auto initType = keepRef ? typeOf(*node.expr) : valueTypeOf(*node.expr);
 		if (isPrim(declared, BuiltinType::Void)) {
 			if (isRefType(initType))
-				reportError("Reference variable '" + tokenText(node.name) +
-						"' needs an explicit type, e.g. &mut int " + tokenText(node.name));
-			declared = initType; // no explicit type given: infer from initializer
+				reportError(node.line, node.col, "Reference variable '" + tokenText(node.name) + "' needs an explicit type, e.g. &mut int " + tokenText(node.name));
+			declared = initType; 
 		} else if (!isTypeCompatible(declared, initType.get())) {
-			reportError("Type mismatch in declaration of " + tokenText(node.name) +
-					": expected " + declared->toString() + " but got " + initType->toString());
+			reportError(node.line, node.col, "Type mismatch in declaration of " + tokenText(node.name) + ": expected " + declared->toString() + " but got " + initType->toString());
 		}
 	}
 
 	auto sym = std::make_shared<VarSymbol>(tokenText(node.name), declared, node.expr != nullptr);
 	if (!scopeManager.declare(tokenText(node.name), sym)) {
-		reportError("Redeclaration of variable: " + tokenText(node.name));
+		reportError(node.line, node.col, "Redeclaration of variable: " + tokenText(node.name));
 	}
 	std::string dangling;
 	if (node.expr && carriesReference(declared))
@@ -597,9 +610,9 @@ void TypeChecker::visit(BinaryExpr& node) {
 		case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
 		case BinaryOp::Div: case BinaryOp::Mod: case BinaryOp::Power:
 			if (!l->equals(r.get())) {
-				reportError("Type mismatch in binary operation: " + l->toString() + " vs " + r->toString());
+				reportError(node.line, node.col, "Type mismatch in binary operation: " + l->toString() + " vs " + r->toString());
 			} else if (!isNumeric(l)) {
-				reportError("Arithmetic operator requires numeric operands, got " + l->toString());
+				reportError(node.line, node.col, "Arithmetic operator requires numeric operands, got " + l->toString());
 			}
 			currentType = l;
 			break;
@@ -607,21 +620,21 @@ void TypeChecker::visit(BinaryExpr& node) {
 		case BinaryOp::Eq: case BinaryOp::Ne: case BinaryOp::Lt:
 		case BinaryOp::Gt: case BinaryOp::Le: case BinaryOp::Ge:
 			if (!l->equals(r.get())) {
-				reportError("Cannot compare " + l->toString() + " with " + r->toString());
+				reportError(node.line, node.col, "Cannot compare " + l->toString() + " with " + r->toString());
 			}
 			currentType = prim(BuiltinType::Bool);
 			break;
 
 		case BinaryOp::And: case BinaryOp::Or:
 			if (!isPrim(l, BuiltinType::Bool) || !isPrim(r, BuiltinType::Bool)) {
-				reportError("Logical operator requires bool operands");
+				reportError(node.line, node.col, "Logical operator requires bool operands");
 			}
 			currentType = prim(BuiltinType::Bool);
 			break;
 
 		case BinaryOp::BitAnd:
 			if (!isPrim(l, BuiltinType::Int) || !isPrim(r, BuiltinType::Int)) {
-				reportError("Bitwise operator requires int operands");
+				reportError(node.line, node.col, "Bitwise operator requires int operands");
 			}
 			currentType = prim(BuiltinType::Int);
 			break;
@@ -634,11 +647,11 @@ void TypeChecker::visit(UnaryExpr& node) {
 	auto t = valueTypeOf(*node.expr);
 	switch (node.op) {
 		case UnaryOp::Negate:
-			if (!isNumeric(t)) reportError("Cannot negate " + t->toString());
+			if (!isNumeric(t)) reportError(node.line, node.col, "Cannot negate " + t->toString());
 			currentType = t;
 			break;
 		case UnaryOp::Not:
-			if (!isPrim(t, BuiltinType::Bool)) reportError("'!' requires a bool, got " + t->toString());
+			if (!isPrim(t, BuiltinType::Bool)) reportError(node.line, node.col, "'!' requires a bool, got " + t->toString());
 			currentType = prim(BuiltinType::Bool);
 			break;
 	}
@@ -650,16 +663,15 @@ void TypeChecker::visit(Block& node) {
 	for (auto& expr : node.expressions) {
 		if (expr) last = typeOf(*expr);
 	}
-	//scopeManager.dump();
 	scopeManager.exitScope();
-	currentType = last; // a block evaluates to its last expression
+	currentType = last; 
 }
 
 void TypeChecker::visit(IfExpr& node) {
 	if (node.condition) {
 		auto c = valueTypeOf(*node.condition);
 		if (!isPrim(c, BuiltinType::Bool)) {
-			reportError("If condition must be bool, got " + c->toString());
+			reportError(node.line, node.col, "If condition must be bool, got " + c->toString());
 		}
 	}
 
@@ -677,7 +689,7 @@ void TypeChecker::visit(WhileExpr& node) {
 	if (node.condition) {
 		auto c = valueTypeOf(*node.condition);
 		if (!isPrim(c, BuiltinType::Bool)) {
-			reportError("While condition must be bool, got " + c->toString());
+			reportError(node.line, node.col, "While condition must be bool, got " + c->toString());
 		}
 	}
 	if (node.loopBranch) typeOf(*node.loopBranch);
@@ -705,10 +717,9 @@ void TypeChecker::visit(ImportExpr& node) {
 		targetPath = (parentDir / targetPath).lexically_normal();
 	}
 
-
 	const Module* importedModule = this->pipeline->getModuleByPath(targetPath.string());
 	if (!importedModule || !importedModule->astRoot) {
-		reportError("Could not resolve imported module: " + targetPath.string());
+		reportError(node.line, node.col, "Could not resolve imported module: " + targetPath.string());
 		currentType = prim(BuiltinType::Void);
 		return;
 	}
@@ -734,10 +745,10 @@ void TypeChecker::visit(ImportExpr& node) {
 			}
 		}
 	}
-	scopeManager.dump();
+
+	reportError(node.line, node.col, "The imported module " + actualPath + " doesn't exist");
 	currentType = prim(BuiltinType::Void);
 }
-
 
 void TypeChecker::visit(CastExpr& node) {
 	if (!node.expr) { currentType = prim(BuiltinType::Void); return; }
@@ -751,15 +762,14 @@ void TypeChecker::visit(CastExpr& node) {
 void TypeChecker::visit(AssignExpr& node) {
 	if (!node.target || !node.value) { currentType = prim(BuiltinType::Void); return; }
 
-	// For `r = v` / `r.x = v` the left side is the *referenced* value.
 	auto targetType = valueTypeOf(*node.target);
 	auto valueType  = valueTypeOf(*node.value);
 
 	if (!isWritable(*node.target)) {
-		reportError("Cannot assign through an immutable reference (declare it as &mut)");
+		reportError(node.line, node.col, "Cannot assign through an immutable reference (declare it as &mut)");
 	}
 	if (!targetType->equals(valueType.get())) {
-		reportError("Cannot assign " + valueType->toString() + " to " + targetType->toString());
+		reportError(node.line, node.col, "Cannot assign " + valueType->toString() + " to " + targetType->toString());
 	}
 	currentType = targetType;
 }
@@ -768,9 +778,9 @@ void TypeChecker::visit(PostfixExpr& node) {
 	if (!node.expr) { currentType = prim(BuiltinType::Void); return; }
 
 	auto t = valueTypeOf(*node.expr);
-	if (!isNumeric(t)) reportError("++/-- requires a numeric operand, got " + t->toString());
+	if (!isNumeric(t)) reportError(node.line, node.col, "++/-- requires a numeric operand, got " + t->toString());
 	if (!isWritable(*node.expr)) {
-		reportError("Cannot modify a value through an immutable reference (declare it as &mut)");
+		reportError(node.line, node.col, "Cannot modify a value through an immutable reference (declare it as &mut)");
 	}
 	currentType = t;
 }

@@ -35,6 +35,9 @@ struct TypeDesc {
 //--------------------------//
 
 struct Expression {
+	size_t line = 0;
+	size_t col = 0;
+
 	virtual ~Expression() = default;
 	virtual void accept(ASTVisitor& visitor) = 0;
 	[[nodiscard]] virtual std::unique_ptr<Expression> clone() const = 0;
