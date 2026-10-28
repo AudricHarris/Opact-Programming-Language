@@ -318,9 +318,61 @@ bool Parser::parseIsVarDeclRef()
 	if (this->peekAt(offset).getKind() == TokenKind::MUT) offset++;
 
 	bool hasType = (this->peekAt(offset).getKind() == TokenKind::IDENTIFIER);
-	bool hasName = (this->peekAt(offset + 1).getKind() == TokenKind::IDENTIFIER);
+	if (!hasType) return false;
+	offset++;
 
-	return hasType && hasName;
+	while (this->peekAt(offset).getKind() == TokenKind::LBRACKET)
+	{
+		offset++;
+		
+		while (this->peekAt(offset).getKind() != TokenKind::RBRACKET && 
+		       this->peekAt(offset).getKind() != TokenKind::END_OF_FILE)
+		{
+			offset++;
+		}
+		
+		if (this->peekAt(offset).getKind() == TokenKind::RBRACKET)
+		{
+			offset++;
+		}
+	}
+
+	bool hasName = (this->peekAt(offset).getKind() == TokenKind::IDENTIFIER);
+
+	return hasName;
+}
+
+bool Parser::parseIsVarDecl()
+{
+	int index = 0;
+
+	// 1. The "type" is an identifier (e.g., int, i32, str, Human)
+	if (this->peekAt(index).getKind() != TokenKind::IDENTIFIER) {
+		return false;
+	}
+	index++;
+
+	// 2. Optional: handle array brackets if they are part of the type (e.g., int[] or int[10])
+	while (this->peekAt(index).getKind() == TokenKind::LBRACKET) {
+		index++;
+		while (this->peekAt(index).getKind() != TokenKind::RBRACKET && 
+				this->peekAt(index).getKind() != TokenKind::END_OF_FILE) {
+			index++;
+		}
+		if (this->peekAt(index).getKind() == TokenKind::RBRACKET) {
+			index++;
+		}
+	}
+
+	// 3. The variable name must also be an identifier (e.g., agePtr, h)
+	if (this->peekAt(index).getKind() != TokenKind::IDENTIFIER) {
+		return false;
+	}
+	index++;
+
+	// 4. Confirm it's a declaration by checking for an assignment '=' or statement terminator ';'
+	TokenKind nextKind = this->peekAt(index).getKind();
+	return (nextKind == TokenKind::ASSIGN || nextKind == TokenKind::SEMI);
 }
 
 ExprPtr Parser::parseFunction(std::optional<Token> visib)
@@ -495,7 +547,7 @@ ExprPtr Parser::parseExpression()
 		return this->parseBorrow();
 	}
 
-	if (this->check(TokenKind::IDENTIFIER) && this->peekAt(1).getKind() == TokenKind::IDENTIFIER) {
+	if (this->parseIsVarDecl()) {
 		return this->parseVarDecl();
 	}
 
@@ -599,7 +651,7 @@ ExprPtr Parser::parseVarDecl()
 	Token startTok = this->peek();
 	TypeDesc desc;
 
-	// Handle reference types like &mut i32 t
+	// Handle reference types (& / &mut)
 	if (this->match(TokenKind::AND))
 	{
 		desc.isReference = true;
@@ -609,15 +661,27 @@ ExprPtr Parser::parseVarDecl()
 		}
 	}
 
-	// Type is always an IDENTIFIER (e.g. i32, bool, MyClass)
+	// Parse Base Type Identifier (e.g. i32, bool, MyClass)
 	Token typeTok = this->expect(TokenKind::IDENTIFIER, "Expected type name for variable declaration");
-
-	// Name is always the next IDENTIFIER (e.g. t, x, my_var)
-	Token nameTok = this->expect(TokenKind::IDENTIFIER, "Expected variable name after type");
-
 	desc.type = determineType(typeTok); 
 	desc.customTypeName = typeTok.getWord();
 
+	// Parse Array Dimensions [5][10]...
+	while (this->match(TokenKind::LBRACKET))
+	{
+		Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size inside brackets []");
+
+		// Convert token value to integer (assuming getInt() or std::stoi)
+		int dimensionSize = std::stoi(sizeTok.getWord()); 
+		desc.dim.push_back(dimensionSize);
+
+		this->expect(TokenKind::RBRACKET, "Expected closing ']' after array size");
+	}
+
+	// Parse Variable Name Identifier (e.g. t, x, my_var)
+	Token nameTok = this->expect(TokenKind::IDENTIFIER, "Expected variable name");
+
+	// Parse Optional Initializer (= ...)
 	ExprPtr initExpr = nullptr;
 	if (this->match(TokenKind::ASSIGN))
 	{
@@ -901,6 +965,11 @@ ExprPtr Parser::parsePrimary()
 		return std::make_unique<IdentifierExpr>(tok.getWord());
 	}
 
+	if (this->check(TokenKind::LBRACE))
+	{
+		return this->parseArrayLiteral();
+	}
+
 	Token tok = this->consume();
 	switch (tok.getKind()) {
 		case TokenKind::LIT_INT:
@@ -948,4 +1017,30 @@ ExprPtr Parser::parsePrimary()
 					 throw std::runtime_error(error);
 				 }
 	}
+}
+
+ExprPtr Parser::parseArrayLiteral()
+{
+	Token tok = this->expect(TokenKind::LBRACE, "Expected '{' to start array initializer");
+	std::vector<ExprPtr> elements;
+
+	// Handle non-empty initializer list
+	if (!this->check(TokenKind::RBRACE))
+	{
+		do
+		{
+			// Allow trailing commas (e.g., {1, 2, 3,})
+			if (this->check(TokenKind::RBRACE))
+			{
+				break;
+			}
+
+			elements.push_back(this->parseExpression());
+
+		} while (this->match(TokenKind::COMMA));
+	}
+
+	this->expect(TokenKind::RBRACE, "Expected '}' after array initializer list");
+
+	return makeNode<ArrayLiteralExpr>(tok, std::move(elements));
 }

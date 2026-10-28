@@ -206,7 +206,6 @@ struct CastExpr : Expression {
 	}
 };
 
-
 //------------------------------//
 //-- Structures & creations   --//
 //------------------------------//
@@ -252,7 +251,7 @@ struct StructDeclExpr : Expression {
 
 	StructDeclExpr(std::string name = "", std::vector<StructureField> attributes = {}, bool isPublic = false)
 		: name(std::move(name)), attributes(std::move(attributes)), isPublic(isPublic) {}
-	
+
 	void accept(ASTVisitor& visitor) override;
 	[[nodiscard]] ExprPtr clone() const override {
 		std::vector<StructureField> clonedFields;
@@ -260,7 +259,7 @@ struct StructDeclExpr : Expression {
 		for (const auto& f : attributes) {
 			clonedFields.push_back(f.clone());
 		}
-		
+
 		return std::make_unique<StructDeclExpr>(name, std::move(clonedFields), isPublic);
 	}
 };
@@ -322,12 +321,12 @@ struct IfExpr : Expression {
 	void accept(ASTVisitor& visitor) override;
 	[[nodiscard]] ExprPtr clone() const override {
 		return std::make_unique<IfExpr>(
-			condition ? condition->clone() : nullptr,
-			ifBranch ? ifBranch->clone() : nullptr,
-			cloneOptional(elseBranch)
-		);
+				condition ? condition->clone() : nullptr,
+				ifBranch ? ifBranch->clone() : nullptr,
+				cloneOptional(elseBranch)
+				);
 	}
-	
+
 	[[nodiscard]] virtual bool requiresSemicolon() const override { return false; }
 };
 
@@ -341,11 +340,11 @@ struct WhileExpr : Expression {
 	void accept(ASTVisitor& visitor) override;
 	[[nodiscard]] ExprPtr clone() const override {
 		return std::make_unique<WhileExpr>(
-			condition ? condition->clone() : nullptr,
-			loopBranch ? loopBranch->clone() : nullptr
-		);
+				condition ? condition->clone() : nullptr,
+				loopBranch ? loopBranch->clone() : nullptr
+				);
 	}
-	
+
 	[[nodiscard]] virtual bool requiresSemicolon() const override { return false; }
 };
 
@@ -358,10 +357,10 @@ struct LoopExpr : Expression {
 	void accept(ASTVisitor& visitor) override;
 	[[nodiscard]] ExprPtr clone() const override {
 		return std::make_unique<LoopExpr>(
-			loopBranch ? loopBranch->clone() : nullptr
-		);
+				loopBranch ? loopBranch->clone() : nullptr
+				);
 	}
-	
+
 	[[nodiscard]] virtual bool requiresSemicolon() const override { return false; }
 };
 
@@ -528,7 +527,7 @@ struct FunctionDeclExpr : Expression {
 		}
 		return std::make_unique<FunctionDeclExpr>(name, std::move(clonedParams), returnType, body ? body->clone() : nullptr, isPublic, isStatic);
 	}
-	
+
 	[[nodiscard]] virtual bool requiresSemicolon() const override { return false; }
 };
 
