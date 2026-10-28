@@ -94,6 +94,10 @@ llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 		return from->getPrimitiveSizeInBits() < to->getPrimitiveSizeInBits()
 			? builder.CreateFPExt(v, to, "fpext") : builder.CreateFPTrunc(v, to, "fptrunc");
 
+	if (from->isPointerTy() && to->isStructTy()) {
+		return builder.CreateLoad(to, v, "struct_coerce_load");
+	}
+
 	error("Cannot convert between these types");
 	return nullptr;
 }
@@ -495,6 +499,26 @@ void CodeGenerator::visit(LiteralExpr& node) {
 	}
 }
 
+llvm::Type* CodeGenerator::getExprType(Expression* e) {
+	if (!e) return nullptr;
+	if (auto* sce = dynamic_cast<StructCreateExpr*>(e)) {
+		if (auto* id = dynamic_cast<IdentifierExpr*>(sce->structObj.get())) {
+			auto it = structs.find(id->name);
+			if (it != structs.end()) return it->second.type;
+		}
+	}
+	if (auto* ale = dynamic_cast<ArrayLiteralExpr*>(e)) {
+		if (!ale->elements.empty()) {
+			llvm::Type* innerElemTy = getExprType(ale->elements[0].get());
+			if (innerElemTy) {
+				return llvm::ArrayType::get(innerElemTy, ale->elements.size());
+			}
+		}
+	}
+	llvm::Value* v = emit(e);
+	return v ? v->getType() : nullptr;
+}
+
 void CodeGenerator::visit(ArrayLiteralExpr& node) {
 	lastValue = nullptr;
 	if (node.elements.empty()) {
@@ -502,11 +526,15 @@ void CodeGenerator::visit(ArrayLiteralExpr& node) {
 		return;
 	}
 
-	llvm::Value* firstVal = emit(node.elements[0].get());
-	if (!firstVal) return;
-	llvm::Type* elemTy = firstVal->getType();
-	size_t numElements = node.elements.size();
+	// Correctly resolve the expected element type (struct or nested array)
+	llvm::Type* elemTy = getExprType(node.elements[0].get());
+	if (!elemTy) {
+		llvm::Value* firstVal = emit(node.elements[0].get());
+		if (!firstVal) return;
+		elemTy = firstVal->getType();
+	}
 
+	size_t numElements = node.elements.size();
 	llvm::ArrayType* arrayTy = llvm::ArrayType::get(elemTy, numElements);
 	if (!currentFn) {
 		error("Array literal outside of a function");
@@ -518,7 +546,13 @@ void CodeGenerator::visit(ArrayLiteralExpr& node) {
 	for (size_t i = 0; i < numElements; ++i) {
 		llvm::Value* val = emit(node.elements[i].get());
 		if (!val) return;
-		val = coerce(val, elemTy);
+
+		// If the element type is a struct or array, load it from its temporary pointer
+		if ((elemTy->isStructTy() || elemTy->isArrayTy()) && val->getType()->isPointerTy()) {
+			val = builder.CreateLoad(elemTy, val, "elem_load");
+		} else {
+			val = coerce(val, elemTy);
+		}
 
 		llvm::Value* elemPtr = builder.CreateInBoundsGEP(
 			arrayTy,
@@ -1006,20 +1040,37 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 	lastValue = nullptr;
 
 	if (node.memberName == "length") {
-		// Check if it's an array type
 		llvm::Type* arrTy = nullptr;
+		
+		// 1. Check if the object is a direct array identifier (e.g., lstHuman.length)
 		if (auto* id = dynamic_cast<IdentifierExpr*>(node.object.get())) {
 			VarInfo* var = lookupVar(id->name);
 			if (var) arrTy = var->type;
+		} 
+		// 2. Check if the object is an array index expression (e.g., lstHuman[cptX].length)
+		else if (auto* aie = dynamic_cast<ArrayIndexExpr*>(node.object.get())) {
+			if (auto* baseId = dynamic_cast<IdentifierExpr*>(aie->array.get())) {
+				VarInfo* var = lookupVar(baseId->name);
+				if (var && var->type->isArrayTy()) {
+					arrTy = var->type;
+					// Peel back one array dimension for each index accessed
+					for (size_t i = 0; i < aie->indices.size(); ++i) {
+						if (arrTy->isArrayTy()) {
+							arrTy = llvm::cast<llvm::ArrayType>(arrTy)->getElementType();
+						}
+					}
+				}
+			}
 		}
 
+		// If we successfully resolved a multi-dimensional or 1D array type, return its compile-time size
 		if (arrTy && arrTy->isArrayTy()) {
 			uint64_t len = llvm::cast<llvm::ArrayType>(arrTy)->getNumElements();
 			lastValue = builder.getInt32(static_cast<uint32_t>(len));
 			return;
 		}
 
-		// Check if it's a string type (emits a runtime strlen call)
+		// 3. Fallback: Check if it's a string type (emits a runtime strlen call)
 		llvm::Value* objVal = emit(node.object.get());
 		if (objVal && objVal->getType()->isPointerTy()) {
 			auto sizeTy = builder.getInt64Ty();
@@ -1031,7 +1082,7 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 		}
 	}
 
-	// Fallback to regular structure field access
+	// 4. Fallback to regular structure field access
 	llvm::Value* addr = nullptr;
 	llvm::Type* ty = nullptr;
 	if (!emitFieldAddr(node, addr, ty)) return;

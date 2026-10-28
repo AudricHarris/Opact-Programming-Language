@@ -689,7 +689,16 @@ void TypeChecker::visit(BinaryExpr& node) {
 	auto r = valueTypeOf(*node.right);
 
 	switch (node.op) {
-		case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
+		case BinaryOp::Add:
+			if (!l->equals(r.get())) {
+				reportError(node.line, node.col, "Type mismatch in binary operation: " + l->toString() + " vs " + r->toString());
+			} else if (!isNumeric(l) && !isPrim(l, BuiltinType::Str)) {
+				reportError(node.line, node.col, "Operator '+' requires numeric or string operands, got " + l->toString());
+			}
+			currentType = l;
+			break;
+
+		case BinaryOp::Sub: case BinaryOp::Mul:
 		case BinaryOp::Div: case BinaryOp::Mod: case BinaryOp::Power:
 			if (!l->equals(r.get())) {
 				reportError(node.line, node.col, "Type mismatch in binary operation: " + l->toString() + " vs " + r->toString());

@@ -198,7 +198,7 @@ private:
 	bool emitFieldAddr(MemberAccessExpr& ma, llvm::Value*& addr, llvm::Type*& type);
 
 	static std::string tokenText(const Token& t) { return t.getWord(); }
-
+	llvm::Type* getExprType(Expression* e);
 	//----------------------------------------------------------------------//
 	//  State                                                               //
 	//----------------------------------------------------------------------//
