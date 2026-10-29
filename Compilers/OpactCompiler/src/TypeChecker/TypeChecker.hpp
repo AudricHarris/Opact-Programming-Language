@@ -74,6 +74,12 @@ private:
 	std::vector<FunctionDeclExpr> persistentBuiltins_;
 	int errorCount_ = 0;
 
+	std::unordered_set<const void*> unsignedVars_;
+	std::unordered_set<const Expression*> unsignedExprs_;
+	std::unordered_map<std::string, std::vector<bool>> fnParamUnsigned_;
+	std::unordered_map<std::string, std::unordered_set<std::string>> unsignedFields_;
+	bool currentReturnUnsigned_ = false;
+
 	std::shared_ptr<Type> typeOf(Expression& node);
 	std::shared_ptr<Type> fromDesc(const TypeDesc& desc);
 	TypeDesc toDesc(const std::shared_ptr<Type>& type) const;
@@ -81,6 +87,9 @@ private:
 	std::shared_ptr<StructType> buildStructureType(const StructDeclExpr& structure);
 	void declareFunction(const FunctionDeclExpr& fn);
 	void declareStructures(const StructDeclExpr& structure);
+
+	void checkNoNegativeConst(Expression& e, const std::string& what);
+	bool isUnsignedField(const std::string& structName, const std::string& field) const;
 
 	void declareBuiltins();
 	void reportError(size_t line, size_t col, const std::string& primaryMsg, const std::string& note = "");

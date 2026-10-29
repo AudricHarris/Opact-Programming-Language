@@ -15,7 +15,12 @@ struct ASTVisitor;
 //-- Type System Spec --//
 //----------------------//
 
-enum class DataType { Int, Float, Bool, Char, Str, Void, Custom };
+enum class DataType {
+	I8, I16, I32, I64, Int,
+	U8, U16, U32, U64, UInt,
+	F32, F64, Float,
+	Bool, Char, Str, Void, Custom
+};
 
 struct TypeDesc {
 	DataType type = DataType::Void;
@@ -24,10 +29,28 @@ struct TypeDesc {
 	std::vector<int> dim;
 
 	bool isReference = false;
-	bool isMutable	 = false;
-	bool isDynamic	 = false;
+	bool isMutable   = false;
+	bool isDynamic   = false;
 
 	[[nodiscard]] bool isArray() const { return !dim.empty(); }
+
+	[[nodiscard]] bool isSignedInteger() const {
+		return type == DataType::I8 || type == DataType::I16 || type == DataType::I32 || 
+			type == DataType::I64 || type == DataType::Int;
+	}
+
+	[[nodiscard]] bool isUnsignedInteger() const {
+		return type == DataType::U8 || type == DataType::U16 || type == DataType::U32 || 
+			type == DataType::U64 || type == DataType::UInt;
+	}
+
+	[[nodiscard]] bool isInteger() const {
+		return isSignedInteger() || isUnsignedInteger();
+	}
+
+	[[nodiscard]] bool isFloat() const {
+		return type == DataType::F32 || type == DataType::F64 || type == DataType::Float;
+	}
 };
 
 //--------------------------//

@@ -231,22 +231,25 @@ DataType determineType(const Token& t)
 	const std::string& word = t.getWord();
 
 	if (word == "char") return DataType::Char;
-	if (word == "str")	return DataType::Str;
+	if (word == "str")  return DataType::Str;
 	if (word == "bool") return DataType::Bool;
-
-	if (word == "int" || word == "uint" ||
-			word == "i8"  || word == "i16"	|| word == "i32" || word == "i64" ||
-			word == "u8"  || word == "u16"	|| word == "u32" || word == "u64") 
-	{
-		return DataType::Int;
-	}
-
-	if (word == "float" || word == "f32" || word == "f64") 
-	{
-		return DataType::Float;
-	}
-
 	if (word == "void") return DataType::Void;
+
+	// Signed integers
+	if (word == "i8")  return DataType::I8;
+	if (word == "i16") return DataType::I16;
+	if (word == "i32" || word == "int") return DataType::I32;
+	if (word == "i64") return DataType::I64;
+
+	// Unsigned integers
+	if (word == "u8")  return DataType::U8;
+	if (word == "u16") return DataType::U16;
+	if (word == "u32" || word == "uint") return DataType::U32;
+	if (word == "u64") return DataType::U64;
+
+	// Floats
+	if (word == "f32") return DataType::F32;
+	if (word == "f64" || word == "float") return DataType::F64;
 
 	return DataType::Custom;
 }
@@ -324,13 +327,13 @@ bool Parser::parseIsVarDeclRef()
 	while (this->peekAt(offset).getKind() == TokenKind::LBRACKET)
 	{
 		offset++;
-		
+
 		while (this->peekAt(offset).getKind() != TokenKind::RBRACKET && 
-		       this->peekAt(offset).getKind() != TokenKind::END_OF_FILE)
+				this->peekAt(offset).getKind() != TokenKind::END_OF_FILE)
 		{
 			offset++;
 		}
-		
+
 		if (this->peekAt(offset).getKind() == TokenKind::RBRACKET)
 		{
 			offset++;

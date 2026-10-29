@@ -7,11 +7,12 @@
 //  File layout:                                                            //
 //    CodeGenerator.hpp  -> this file: the class + helper declarations      //
 //    CodeGenerator.cpp  -> core: types, operators, visitors                //
-//    Builtins.cpp       -> builtins: Printf/Println, C library wrappers    //
+//    Builtins.cpp       -> builtins: Printf/Println, Range, Random, C libs //
 //==========================================================================//
 
 #include "../Parser/Ast.hpp"
 #include "../Parser/Parser.hpp"
+#include "../Parser/RangeUtil.hpp"
 #include "../Lexer/Lexer.hpp"
 
 #include "llvm/IR/IRBuilder.h"
@@ -22,6 +23,7 @@
 #include <llvm/IR/DerivedTypes.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -147,6 +149,7 @@ private:
 		llvm::Type* type;
 		llvm::StructType* structType = nullptr;
 		llvm::Type* pointee = nullptr; // set for references to non-struct types (what the pointer points at)
+		bool isUnsigned = false;
 	};
 	struct LoopTargets { llvm::BasicBlock* breakBB; llvm::BasicBlock* continueBB; };
 	struct StructInfo {
@@ -154,8 +157,21 @@ private:
 		std::vector<std::string> fieldNames;
 		std::vector<bool> fieldIsRef;
 		std::vector<llvm::Type*> fieldPointee;
+		std::vector<bool> fieldIsUnsigned;
+	};
+	struct FnSign {
+		std::vector<bool> paramUnsigned;
+		bool retUnsigned = false;
 	};
 
+	std::vector<std::vector<llvm::Value*>> scopeCleanups;
+	std::unordered_map<std::string, FnSign> fnSigns;
+
+	void pushScope() { scopeCleanups.push_back({}); }
+	void popScope();
+	void registerCleanup(llvm::Value* slot);
+	void emitCleanups(const std::vector<llvm::Value*>& slots, llvm::Value* keep);
+	llvm::AllocaInst* createHeapSlot(const std::string& name);
 
 	//----------------------------------------------------------------------//
 	//  Builtins internals                                     [Builtins.cpp] //
@@ -164,6 +180,9 @@ private:
 	ExprPtr parseInlineExpression(const std::string& src);
 	bool appendFormatArg(llvm::Value*& v, std::string& fmt);
 	llvm::Value* emitFormatted(CallExpr& call, bool newline);
+	llvm::Value* emitRange(CallExpr& call);
+	llvm::Value* emitRandom(CallExpr& call);
+	bool constI32(Expression* e, long long& out);
 
 	//----------------------------------------------------------------------//
 	//  Type system                                         [CodeGenerator.cpp] //
@@ -173,9 +192,19 @@ private:
 	llvm::Value* coerce(llvm::Value* v, llvm::Type* to);
 	llvm::Value* promoteVarArg(llvm::Value* v);
 	bool         unify(llvm::Value*& l, llvm::Value*& r);
-	llvm::Value* emitBinary(BinaryOp op, llvm::Value* l, llvm::Value* r);
+	llvm::Value* emitBinary(BinaryOp op, llvm::Value* l, llvm::Value* r, bool isUnsigned);
 	llvm::Value* emitLValue(Expression* e);
 	llvm::Type*  pointeeOf(const TypeDesc& d);
+
+	//----------------------------------------------------------------------//
+	//  Unsigned support                                    [CodeGenerator.cpp] //
+	//----------------------------------------------------------------------//
+	bool parseIntLiteral(LiteralExpr& lit, bool& neg, unsigned long long& mag);
+	bool evalConstInt(Expression* e, bool& neg, unsigned long long& mag);
+	bool isUnsignedExpr(Expression* e);
+	bool unsignedCtx = false;
+	llvm::Value* emitUnsignedValue(Expression* e, llvm::Type* ty, const std::string& what);
+	void emitNegativeCheck(llvm::Value* v, const std::string& what);
 
 	//----------------------------------------------------------------------//
 	//  Helpers                                             [CodeGenerator.cpp] //
@@ -184,8 +213,6 @@ private:
 	llvm::Value* emit(Expression* e);
 	llvm::Value* emitRef(Expression* e);   // address of a reference instead of its dereferenced value
 
-	void pushScope();
-	void popScope();
 	VarInfo* lookupVar(const std::string& name);
 
 	bool blockTerminated();
@@ -199,6 +226,7 @@ private:
 
 	static std::string tokenText(const Token& t) { return t.getWord(); }
 	llvm::Type* getExprType(Expression* e);
+
 	//----------------------------------------------------------------------//
 	//  State                                                               //
 	//----------------------------------------------------------------------//

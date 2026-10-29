@@ -11,6 +11,8 @@
 //==========================================================================//
 #include "CodeGenerator.hpp"
 #include <llvm/IR/DerivedTypes.h>
+#include <algorithm>
+#include <cstdint>
 
 //==========================================================================//
 //  1. Constructor                                                          //
@@ -30,8 +32,13 @@ llvm::Type* CodeGenerator::mapType(const TypeDesc& d) {
 	}
 	llvm::Type* base = nullptr;
 	switch (d.type) {
-		case DataType::Int:   base = builder.getInt32Ty();   break;
-		case DataType::Float: base = builder.getDoubleTy();  break;
+		case DataType::I8:  case DataType::U8:  base = builder.getInt8Ty();   break;
+		case DataType::I16: case DataType::U16: base = builder.getInt16Ty();  break;
+		case DataType::I32: case DataType::Int:  base = builder.getInt32Ty();   break;
+		case DataType::U32: case DataType::UInt: base = builder.getInt32Ty();  break;
+		case DataType::I64: case DataType::U64: base = builder.getInt64Ty();  break;
+		case DataType::F32: base = builder.getFloatTy();   break;
+		case DataType::F64: case DataType::Float: base = builder.getDoubleTy(); break;
 		case DataType::Bool:  base = builder.getInt1Ty();    break;
 		case DataType::Char:  base = builder.getInt8Ty();    break;
 		case DataType::Str:   base = builder.getPtrTy();     break;
@@ -83,11 +90,13 @@ llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 	if (from->isIntegerTy() && to->isIntegerTy()) {
 		unsigned fb = from->getIntegerBitWidth(), tb = to->getIntegerBitWidth();
 		if (tb < fb) return builder.CreateTrunc(v, to, "trunc");
-		return fb == 1 ? builder.CreateZExt(v, to, "zext") : builder.CreateSExt(v, to, "sext");
+		if (fb == 1) return builder.CreateZExt(v, to, "zext");
+
+		return builder.CreateSExt(v, to, "sext");
 	}
 	if (from->isIntegerTy() && to->isFloatingPointTy())
 		return from->isIntegerTy(1) ? builder.CreateUIToFP(v, to, "uitofp")
-		                            : builder.CreateSIToFP(v, to, "sitofp");
+			: builder.CreateSIToFP(v, to, "sitofp");
 	if (from->isFloatingPointTy() && to->isIntegerTy())
 		return builder.CreateFPToSI(v, to, "fptosi");
 	if (from->isFloatingPointTy() && to->isFloatingPointTy())
@@ -142,7 +151,7 @@ bool CodeGenerator::unify(llvm::Value*& l, llvm::Value*& r) {
 	return false;
 }
 
-llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value* r) {
+llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value* r, bool isUnsigned) {
 	if (op == BinaryOp::And) return builder.CreateAnd(toBool(l), toBool(r), "andtmp");
 	if (op == BinaryOp::Or)  return builder.CreateOr(toBool(l),  toBool(r), "ortmp");
 
@@ -152,6 +161,10 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 	// String/pointer concatenation BEFORE unify so different pointer types don't trigger errors
 	if (op == BinaryOp::Add && !lt->isFloatingPointTy() && !lt->isIntegerTy() &&
 			!rt->isFloatingPointTy() && !rt->isIntegerTy()) {
+		if (!currentFn) {
+			error("String concatenation outside of a function");
+			return nullptr;
+		}
 		auto charPtrTy = builder.getPtrTy();
 		auto sizeTy = builder.getInt64Ty();
 		auto strlenFn = module->getOrInsertFunction("strlen", llvm::FunctionType::get(sizeTy, { charPtrTy }, false));
@@ -166,6 +179,12 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 				llvm::ConstantInt::get(sizeTy, 1),
 				"totallen");
 		llvm::Value* dest = builder.CreateCall(mallocFn, { totalLen }, "dest");
+
+		// Own the heap string through a null-initialised entry-block slot.
+		llvm::AllocaInst* slot = createHeapSlot("heap_str");
+		builder.CreateStore(dest, slot);
+		registerCleanup(slot);
+
 		builder.CreateCall(memcpyFn, { dest, str1, len1 });
 		llvm::Value* destOffset = builder.CreateInBoundsGEP(builder.getInt8Ty(), dest, { len1 }, "dest_offset");
 		llvm::Value* len2Plus1 = builder.CreateAdd(len2, llvm::ConstantInt::get(sizeTy, 1), "len2_plus_1");
@@ -182,26 +201,19 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 		case BinaryOp::Add: return fp ? builder.CreateFAdd(l, r, "addtmp") : builder.CreateAdd(l, r, "addtmp");
 		case BinaryOp::Sub: return fp ? builder.CreateFSub(l, r, "subtmp") : builder.CreateSub(l, r, "subtmp");
 		case BinaryOp::Mul: return fp ? builder.CreateFMul(l, r, "multmp") : builder.CreateMul(l, r, "multmp");
-		case BinaryOp::Div: return fp ? builder.CreateFDiv(l, r, "divtmp") : builder.CreateSDiv(l, r, "divtmp");
-		case BinaryOp::Mod: return fp ? builder.CreateFRem(l, r, "modtmp") : builder.CreateSRem(l, r, "modtmp");
-
-		case BinaryOp::Power: {
-			llvm::Type* d = builder.getDoubleTy();
-			llvm::Value* res = builder.CreateIntrinsic(llvm::Intrinsic::pow, { d },
-					{ coerce(l, d), coerce(r, d) }, nullptr, "powtmp");
-			return fp ? res : coerce(res, lt);
-		}
-
-		case BinaryOp::BitAnd:
-			if (fp) { error("Bitwise operator needs integer operands"); return nullptr; }
-			return builder.CreateAnd(l, r, "bandtmp");
+		case BinaryOp::Div:
+			return fp ? builder.CreateFDiv(l, r, "divtmp")
+				: (isUnsigned ? builder.CreateUDiv(l, r, "udivtmp") : builder.CreateSDiv(l, r, "sdivtmp"));
+		case BinaryOp::Mod:
+			return fp ? builder.CreateFRem(l, r, "modtmp")
+				: (isUnsigned ? builder.CreateURem(l, r, "uremtmp") : builder.CreateSRem(l, r, "sremtmp"));
 
 		case BinaryOp::Eq: return fp ? builder.CreateFCmpOEQ(l, r, "cmptmp") : builder.CreateICmpEQ(l, r, "cmptmp");
 		case BinaryOp::Ne: return fp ? builder.CreateFCmpUNE(l, r, "cmptmp") : builder.CreateICmpNE(l, r, "cmptmp");
-		case BinaryOp::Lt: return fp ? builder.CreateFCmpOLT(l, r, "cmptmp") : builder.CreateICmpSLT(l, r, "cmptmp");
-		case BinaryOp::Gt: return fp ? builder.CreateFCmpOGT(l, r, "cmptmp") : builder.CreateICmpSGT(l, r, "cmptmp");
-		case BinaryOp::Le: return fp ? builder.CreateFCmpOLE(l, r, "cmptmp") : builder.CreateICmpSLE(l, r, "cmptmp");
-		case BinaryOp::Ge: return fp ? builder.CreateFCmpOGE(l, r, "cmptmp") : builder.CreateICmpSGE(l, r, "cmptmp");
+		case BinaryOp::Lt: return fp ? builder.CreateFCmpOLT(l, r, "cmptmp") : (isUnsigned ? builder.CreateICmpULT(l, r, "cmptmp") : builder.CreateICmpSLT(l, r, "cmptmp"));
+		case BinaryOp::Gt: return fp ? builder.CreateFCmpOGT(l, r, "cmptmp") : (isUnsigned ? builder.CreateICmpUGT(l, r, "cmptmp") : builder.CreateICmpSGT(l, r, "cmptmp"));
+		case BinaryOp::Le: return fp ? builder.CreateFCmpOLE(l, r, "cmptmp") : (isUnsigned ? builder.CreateICmpULE(l, r, "cmptmp") : builder.CreateICmpSLE(l, r, "cmptmp"));
+		case BinaryOp::Ge: return fp ? builder.CreateFCmpOGE(l, r, "cmptmp") : (isUnsigned ? builder.CreateICmpUGE(l, r, "cmptmp") : builder.CreateICmpSGE(l, r, "cmptmp"));
 		default: break;
 	}
 	error("Unsupported binary operator");
@@ -281,6 +293,111 @@ void CodeGenerator::error(const std::string& msg) {
 	std::cerr << "Codegen Error: " << msg << "\n";
 }
 
+bool CodeGenerator::isUnsignedExpr(Expression* e) {
+	if (!e) return false;
+
+	if (auto* id = dynamic_cast<IdentifierExpr*>(e)) {
+		VarInfo* var = lookupVar(id->name);
+		if (var) return var->isUnsigned;
+		return false;
+	}
+
+	if (auto* castExpr = dynamic_cast<CastExpr*>(e)) {
+		DataType dt = castExpr->castType.type;
+		return dt == DataType::U8 || dt == DataType::U16 ||
+			dt == DataType::U32 || dt == DataType::U64 || dt == DataType::UInt;
+	}
+
+	if (auto* binExpr = dynamic_cast<BinaryExpr*>(e)) {
+		return isUnsignedExpr(binExpr->left.get()) || isUnsignedExpr(binExpr->right.get());
+	}
+
+	if (auto* pf = dynamic_cast<PostfixExpr*>(e)) return isUnsignedExpr(pf->expr.get());
+
+	if (auto* aie = dynamic_cast<ArrayIndexExpr*>(e)) {
+		if (auto* base = dynamic_cast<IdentifierExpr*>(aie->array.get())) {
+			if (VarInfo* var = lookupVar(base->name)) return var->isUnsigned;
+		}
+		return false;
+	}
+
+	if (auto* call = dynamic_cast<CallExpr*>(e)) {
+		if (auto* id = dynamic_cast<IdentifierExpr*>(call->callee.get())) {
+			auto it = fnSigns.find(id->name == "Main" ? "main" : id->name);
+			if (it != fnSigns.end()) return it->second.retUnsigned;
+		}
+		return false;
+	}
+
+	if (auto* ma = dynamic_cast<MemberAccessExpr*>(e)) {
+		Expression* obj = ma->object.get();
+		while (auto* aie = dynamic_cast<ArrayIndexExpr*>(obj)) obj = aie->array.get();
+
+		if (auto* id = dynamic_cast<IdentifierExpr*>(obj)) {
+			if (VarInfo* var = lookupVar(id->name)) {
+				llvm::Type* t = var->type;
+				while (t->isArrayTy()) t = llvm::cast<llvm::ArrayType>(t)->getElementType();
+				llvm::StructType* st = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(t);
+				if (st) {
+					auto it = structs.find(st->getName().str());
+					if (it != structs.end()) {
+						const auto& names = it->second.fieldNames;
+						auto f = std::find(names.begin(), names.end(), ma->memberName);
+						size_t idx = static_cast<size_t>(f - names.begin());
+						if (f != names.end() && idx < it->second.fieldIsUnsigned.size())
+							return it->second.fieldIsUnsigned[idx];
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	return false;
+}
+
+// Parses an integer literal into sign + magnitude. Handles '_' separators,
+// a leading '-', and 0x / 0o / 0b prefixes.
+bool CodeGenerator::parseIntLiteral(LiteralExpr& lit, bool& neg, unsigned long long& mag) {
+	std::string text = tokenText(lit.lit);
+	text.erase(std::remove(text.begin(), text.end(), '_'), text.end());
+
+	neg = false;
+	size_t skip = 0;
+	if (!text.empty() && text[0] == '-') { neg = true; skip = 1; }
+
+	int base = 10;
+	switch (lit.base) {
+		case NumericBase::Hexadecimal: base = 16; skip += 2; break;
+		case NumericBase::Octal:       base = 8;  skip += 2; break;
+		case NumericBase::Binary:      base = 2;  skip += 2; break;
+		default: break;
+	}
+	try {
+		mag = std::stoull(text.substr(skip), nullptr, base);
+	} catch (...) {
+		error("Invalid integer literal '" + text + "'");
+		return false;
+	}
+	if (mag == 0) neg = false; // -0 is just 0
+	return true;
+}
+
+// Compile-time value of an integer constant expression: `5`, `-5`, `-(-5)`.
+// Returns false if `e` is not such a constant.
+bool CodeGenerator::evalConstInt(Expression* e, bool& neg, unsigned long long& mag) {
+	if (auto* lit = dynamic_cast<LiteralExpr*>(e)) {
+		if (lit->kind != LiteralKind::Int) return false;
+		return parseIntLiteral(*lit, neg, mag);
+	}
+	if (auto* un = dynamic_cast<UnaryExpr*>(e); un && un->op == UnaryOp::Negate) {
+		if (!evalConstInt(un->expr.get(), neg, mag)) return false;
+		if (mag != 0) neg = !neg;
+		return true;
+	}
+	return false;
+}
+
 // Evaluates `e` where a *reference* (an address) is wanted, not a value.
 // A reference variable to a primitive is normally auto-dereferenced when read
 // (see visit(IdentifierExpr)); here we hand out the stored pointer instead, so
@@ -301,9 +418,6 @@ llvm::Value* CodeGenerator::emit(Expression* e) {
 	e->accept(*this);
 	return lastValue;
 }
-
-void CodeGenerator::pushScope() { scopes.emplace_back(); }
-void CodeGenerator::popScope()  { scopes.pop_back(); }
 
 CodeGenerator::VarInfo* CodeGenerator::lookupVar(const std::string& name) {
 	for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
@@ -334,6 +448,17 @@ llvm::AllocaInst* CodeGenerator::createEntryAlloca(llvm::Function* fn, llvm::Typ
 	return tmp.CreateAlloca(ty, nullptr, name);
 }
 
+// A pointer-sized stack slot in the entry block, initialised to null right
+// there. Because the null store sits at function entry, every path through the
+// function sees a valid (null or real) pointer when the cleanup code loads it.
+llvm::AllocaInst* CodeGenerator::createHeapSlot(const std::string& name) {
+	llvm::BasicBlock& entry = currentFn->getEntryBlock();
+	llvm::IRBuilder<> tmp(&entry, entry.begin());
+	llvm::AllocaInst* slot = tmp.CreateAlloca(builder.getPtrTy(), nullptr, name);
+	tmp.CreateStore(llvm::ConstantPointerNull::get(builder.getPtrTy()), slot);
+	return slot;
+}
+
 // Computes the address of `obj.member` and the type stored there.
 // If the field is a reference, the stored pointer is followed, so `addr`
 // is the address of the referenced object and `type` is its type.
@@ -354,7 +479,7 @@ bool CodeGenerator::emitFieldAddr(MemberAccessExpr& ma, llvm::Value*& addr, llvm
 			objPtr   = var->addr;
 			structTy = var->structType ? var->structType : llvm::dyn_cast<llvm::StructType>(var->type);
 		}
-	} 
+	}
 	else if (auto* aie = dynamic_cast<ArrayIndexExpr*>(ma.object.get())) {
 		objPtr = emitLValue(aie); // Get the pointer to the struct element
 
@@ -423,6 +548,14 @@ llvm::Function* CodeGenerator::declareFunction(FunctionDeclExpr& node) {
 		params.push_back(pt);
 	}
 
+	// Remember which parameters / return value are unsigned so calls and
+	// returns can reject negative constants.
+	FnSign sign;
+	for (const auto& p : node.params)
+		sign.paramUnsigned.push_back(!p.type.isReference && p.type.isUnsignedInteger());
+	sign.retUnsigned = !node.returnType.isReference && node.returnType.isUnsignedInteger();
+	fnSigns[name] = std::move(sign);
+
 	// Only `public` functions (and main) are visible to other modules;
 	// everything else gets internal linkage so it cannot be linked from outside.
 	auto linkage = (name == "main" || node.isPublic) ? llvm::Function::ExternalLinkage
@@ -447,6 +580,104 @@ void CodeGenerator::emitDefaultReturn() {
 	else builder.CreateRet(llvm::Constant::getNullValue(rt));
 }
 
+// Emits `if (*slot != null && *slot != keep) { free(*slot); *slot = null; }`
+// for every slot. `keep` (may be nullptr) is a pointer that must survive, e.g.
+// the string being returned from the function.
+void CodeGenerator::emitCleanups(const std::vector<llvm::Value*>& slots, llvm::Value* keep) {
+	if (slots.empty() || blockTerminated()) return;
+
+	auto freeFn = module->getOrInsertFunction(
+			"free", llvm::FunctionType::get(builder.getVoidTy(), { builder.getPtrTy() }, false));
+	llvm::Value* nullPtr = llvm::ConstantPointerNull::get(builder.getPtrTy());
+
+	// Newest allocation first.
+	for (auto it = slots.rbegin(); it != slots.rend(); ++it) {
+		llvm::Value* slot = *it;
+		if (!slot) continue;
+
+		llvm::Value* heapPtr = builder.CreateLoad(builder.getPtrTy(), slot, "heap_ptr");
+
+		llvm::Value* shouldFree = builder.CreateIsNotNull(heapPtr, "is_not_null");
+		if (keep && keep->getType()->isPointerTy()) {
+			llvm::Value* notKept = builder.CreateICmpNE(heapPtr, keep, "not_kept");
+			shouldFree = builder.CreateAnd(shouldFree, notKept, "should_free");
+		}
+
+		llvm::BasicBlock* freeBlock = llvm::BasicBlock::Create(context, "do_free", currentFn);
+		llvm::BasicBlock* contBlock = llvm::BasicBlock::Create(context, "cont_free", currentFn);
+		builder.CreateCondBr(shouldFree, freeBlock, contBlock);
+
+		builder.SetInsertPoint(freeBlock);
+		builder.CreateCall(freeFn, { heapPtr });
+		builder.CreateStore(nullPtr, slot); // avoid double free if the slot is reused
+		builder.CreateBr(contBlock);
+
+		builder.SetInsertPoint(contBlock);
+	}
+}
+
+void CodeGenerator::popScope() {
+	if (scopeCleanups.empty()) return;
+
+	auto currentScope = std::move(scopeCleanups.back());
+	scopeCleanups.pop_back();
+
+	emitCleanups(currentScope, nullptr);
+}
+
+void CodeGenerator::registerCleanup(llvm::Value* slot) {
+	if (!scopeCleanups.empty() && slot) {
+		scopeCleanups.back().push_back(slot);
+	}
+}
+
+llvm::Value* CodeGenerator::emitUnsignedValue(Expression* e, llvm::Type* ty, const std::string& what) {
+	if (!e || !ty) return nullptr;
+	if (!ty->isIntegerTy()) return emit(e);
+
+	bool neg = false;
+	unsigned long long mag = 0;
+	if (evalConstInt(e, neg, mag)) {
+		if (neg) { error("Negative constant for unsigned " + what); return nullptr; }
+		unsigned bits = ty->getIntegerBitWidth();
+		if (bits < 64 && mag > ((1ULL << bits) - 1)) {
+			error("Value " + std::to_string(mag) + " is out of range for unsigned " + what);
+			return nullptr;
+		}
+		return llvm::ConstantInt::get(ty, mag, false);
+	}
+
+	llvm::Value* v = emit(e);
+	if (!v) return nullptr;
+
+	if (v->getType()->isIntegerTy() && !v->getType()->isIntegerTy(1) &&
+			!llvm::isa<llvm::Constant>(v) && !isUnsignedExpr(e))
+		emitNegativeCheck(v, what);
+	return v;
+}
+
+void CodeGenerator::emitNegativeCheck(llvm::Value* v, const std::string& what) {
+	llvm::Value* isNeg = builder.CreateICmpSLT(v, llvm::ConstantInt::get(v->getType(), 0), "isneg");
+
+	auto* failBB = llvm::BasicBlock::Create(context, "neg_fail", currentFn);
+	auto* okBB   = llvm::BasicBlock::Create(context, "neg_ok",   currentFn);
+	builder.CreateCondBr(isNeg, failBB, okBB);
+
+	builder.SetInsertPoint(failBB);
+	std::string msg = "Runtime Error: negative value assigned to unsigned " + what + "\n";
+	auto writeFn = module->getOrInsertFunction("write", llvm::FunctionType::get(
+			builder.getInt64Ty(), { builder.getInt32Ty(), builder.getPtrTy(), builder.getInt64Ty() }, false));
+	auto exitFn = module->getOrInsertFunction("exit", llvm::FunctionType::get(
+			builder.getVoidTy(), { builder.getInt32Ty() }, false));
+	llvm::Value* str = builder.CreateGlobalString(msg, "neg_msg");
+	builder.CreateCall(writeFn, { builder.getInt32(2), str, builder.getInt64(msg.size()) });
+	builder.CreateCall(exitFn, { builder.getInt32(1) });
+	builder.CreateUnreachable();
+
+	builder.SetInsertPoint(okBB);
+}
+
+
 //==========================================================================//
 //  4. Visitors                                                             //
 //==========================================================================//
@@ -458,22 +689,17 @@ void CodeGenerator::visit(LiteralExpr& node) {
 
 	switch (node.kind) {
 		case LiteralKind::Int: {
-			text.erase(std::remove(text.begin(), text.end(), '_'), text.end());
-			int base = 10;
-			size_t skip = 0;
-			switch (node.base) {
-				case NumericBase::Hexadecimal: base = 16; skip = 2; break;
-				case NumericBase::Octal:       base = 8;  skip = 2; break;
-				case NumericBase::Binary:      base = 2;  skip = 2; break;
-				default: break;
-			}
-			try {
-				unsigned long long v = std::stoull(text.substr(skip), nullptr, base);
-				llvm::Type* ty = (v > 0x7FFFFFFFULL) ? builder.getInt64Ty() : builder.getInt32Ty();
-				lastValue = llvm::ConstantInt::get(ty, v, false);
-			} catch (...) {
-				error("Invalid integer literal '" + text + "'");
-				lastValue = nullptr;
+			bool neg = false;
+			unsigned long long mag = 0;
+			if (!parseIntLiteral(node, neg, mag)) { lastValue = nullptr; break; }
+
+			if (neg) {
+				long long sv = -static_cast<long long>(mag);
+				llvm::Type* ty = (sv >= INT32_MIN) ? builder.getInt32Ty() : builder.getInt64Ty();
+				lastValue = llvm::ConstantInt::get(ty, static_cast<uint64_t>(sv), /*isSigned=*/true);
+			} else {
+				llvm::Type* ty = (mag > 0x7FFFFFFFULL) ? builder.getInt64Ty() : builder.getInt32Ty();
+				lastValue = llvm::ConstantInt::get(ty, mag, false);
 			}
 			break;
 		}
@@ -520,6 +746,8 @@ llvm::Type* CodeGenerator::getExprType(Expression* e) {
 }
 
 void CodeGenerator::visit(ArrayLiteralExpr& node) {
+	bool ctx = unsignedCtx;
+	unsignedCtx = false;
 	lastValue = nullptr;
 	if (node.elements.empty()) {
 		error("Empty array literal not supported without explicit type");
@@ -544,7 +772,14 @@ void CodeGenerator::visit(ArrayLiteralExpr& node) {
 	llvm::AllocaInst* arrayAlloca = createEntryAlloca(currentFn, arrayTy, "array_lit");
 
 	for (size_t i = 0; i < numElements; ++i) {
-		llvm::Value* val = emit(node.elements[i].get());
+		llvm::Value* val = nullptr;
+		Expression* el = node.elements[i].get();
+		if (ctx) {
+			if (dynamic_cast<ArrayLiteralExpr*>(el)) { unsignedCtx = true; val = emit(el); }
+			else val = emitUnsignedValue(el, elemTy, "array element");
+		} else {
+			val = emit(el);
+		}
 		if (!val) return;
 
 		// If the element type is a struct or array, load it from its temporary pointer
@@ -555,11 +790,11 @@ void CodeGenerator::visit(ArrayLiteralExpr& node) {
 		}
 
 		llvm::Value* elemPtr = builder.CreateInBoundsGEP(
-			arrayTy,
-			arrayAlloca,
-			{ builder.getInt64(0), builder.getInt64(i) },
-			"array_elem_ptr"
-		);
+				arrayTy,
+				arrayAlloca,
+				{ builder.getInt64(0), builder.getInt64(i) },
+				"array_elem_ptr"
+				);
 		builder.CreateStore(val, elemPtr);
 	}
 
@@ -584,7 +819,6 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 		currentTy = var->type;  // This is the array type ([N x T])
 	} else {
 		currentPtr = emitRef(node.array.get());
-		// If it's a nested expression or complex lvalue, handle accordingly
 	}
 
 	if (!currentPtr || !currentTy) {
@@ -639,13 +873,30 @@ void CodeGenerator::visit(VarDeclExpr& node) {
 	std::string name = tokenText(node.name);
 	if (!currentFn) { error("Variable '" + name + "' declared outside of a function"); return; }
 
-	// A declared reference wants an address, everything else wants a value.
+	bool isUnsigned = node.type.isUnsignedInteger();
+
 	llvm::Value* init = nullptr;
-	if (node.expr) init = node.type.isReference ? emitRef(node.expr.get()) : emit(node.expr.get());
+	if (node.expr) {
+		if (node.type.isReference) {
+			init = emitRef(node.expr.get());
+		} else if (isUnsigned) {
+			llvm::Type* want = mapType(node.type);
+			if (want && want->isIntegerTy()) {
+				init = emitUnsignedValue(node.expr.get(), want, "variable '" + name + "'");
+			} else {
+				unsignedCtx = dynamic_cast<ArrayLiteralExpr*>(node.expr.get()) != nullptr;
+				init = emit(node.expr.get());
+				unsignedCtx = false;
+			}
+		} else {
+			init = emit(node.expr.get());
+		}
+	}
 	if (node.expr && !init) { lastValue = nullptr; return; }
 
 	llvm::Type* ty = (node.type.type == DataType::Void && init) ? init->getType() : mapType(node.type);
 	if (!ty || ty->isVoidTy()) { error("Invalid type for variable '" + name + "'"); return; }
+
 
 	llvm::Value* initVal = nullptr;
 	if (init) {
@@ -672,7 +923,7 @@ void CodeGenerator::visit(VarDeclExpr& node) {
 	llvm::Type* pointee = pointeeOf(node.type);
 	if (pointee && pointee->isStructTy()) pointee = nullptr;
 
-	scopes.back()[name] = { slot, ty, st, pointee };
+	scopes.back()[name] = { slot, ty, st, pointee, isUnsigned };
 	lastValue = initVal;
 }
 
@@ -680,6 +931,7 @@ void CodeGenerator::visit(AssignExpr& node) {
 	lastValue = nullptr;
 	llvm::Value* targetPtr = nullptr;
 	llvm::Type* targetType = nullptr;
+	bool targetUnsigned = false;
 
 	if (auto* id = dynamic_cast<IdentifierExpr*>(node.target.get())) {
 		VarInfo* var = lookupVar(id->name);
@@ -687,6 +939,7 @@ void CodeGenerator::visit(AssignExpr& node) {
 			error("Undefined variable '" + id->name + "'");
 			return;
 		}
+		targetUnsigned = var->isUnsigned;
 		if (var->pointee) {
 			// `r = value` on a reference writes to the referenced object.
 			targetPtr  = builder.CreateLoad(builder.getPtrTy(), var->addr, id->name + "_ref");
@@ -698,13 +951,17 @@ void CodeGenerator::visit(AssignExpr& node) {
 	}
 	else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.target.get())) {
 		if (!emitFieldAddr(*ma, targetPtr, targetType)) return;
+		targetUnsigned = isUnsignedExpr(ma);
 	}
 	else {
 		error("Only variables or structure fields can be assigned to");
 		return;
 	}
 
-	llvm::Value* v = coerce(emit(node.value.get()), targetType);
+	llvm::Value* raw = (targetUnsigned && targetType->isIntegerTy())
+		? emitUnsignedValue(node.value.get(), targetType, "variable")
+		: emit(node.value.get());
+	llvm::Value* v = coerce(raw, targetType);
 	if (!v) {
 		lastValue = nullptr;
 		return;
@@ -768,10 +1025,18 @@ void CodeGenerator::visit(PostfixExpr& node) {
 void CodeGenerator::visit(BinaryExpr& node) {
 	llvm::Value* l = emit(node.left.get());
 	llvm::Value* r = emit(node.right.get());
-	lastValue = (l && r) ? emitBinary(node.op, l, r) : nullptr;
+	bool isUnsigned = isUnsignedExpr(node.left.get()) || isUnsignedExpr(node.right.get());
+	lastValue = (l && r) ? emitBinary(node.op, l, r, isUnsigned) : nullptr;
 }
 
 void CodeGenerator::visit(UnaryExpr& node) {
+	// `-x` makes no sense for an unsigned variable.
+	if (node.op == UnaryOp::Negate && isUnsignedExpr(node.expr.get())) {
+		error("Cannot negate an unsigned value");
+		lastValue = nullptr;
+		return;
+	}
+
 	llvm::Value* v = emit(node.expr.get());
 	if (!v) { lastValue = nullptr; return; }
 
@@ -894,16 +1159,33 @@ void CodeGenerator::visit(ContinueExpr&) {
 void CodeGenerator::visit(ReturnExpr& node) {
 	if (!currentFn) { error("'return' outside of a function"); return; }
 
-	llvm::Value* v = (node.value && *node.value) ? emit(node.value->get()) : nullptr;
+	// Unsigned return types can never return a negative constant.
+	auto sg = fnSigns.find(currentFn->getName().str());
+	llvm::Value* v = nullptr;
+	if (node.value && *node.value) {
+		bool u = sg != fnSigns.end() && sg->second.retUnsigned &&
+			currentFn->getReturnType()->isIntegerTy();
+		v = u ? emitUnsignedValue(node.value->get(), currentFn->getReturnType(), "return value")
+			: emit(node.value->get());
+	}
 	llvm::Type* rt = currentFn->getReturnType();
 
-	if (rt->isVoidTy()) {
-		builder.CreateRetVoid();
-	} else {
+	if (!rt->isVoidTy()) {
 		v = v ? coerce(v, rt) : llvm::Constant::getNullValue(rt);
 		if (!v) return;
-		builder.CreateRet(v);
 	}
+
+	// 2) Emit cleanups for every open scope (innermost first) WITHOUT popping
+	//    the compile-time stack. The returned pointer is excluded from freeing.
+	llvm::Value* keep = (v && v->getType()->isPointerTy()) ? v : nullptr;
+	for (auto it = scopeCleanups.rbegin(); it != scopeCleanups.rend(); ++it) {
+		emitCleanups(*it, keep);
+	}
+
+	// 3) Return.
+	if (rt->isVoidTy()) builder.CreateRetVoid();
+	else builder.CreateRet(v);
+
 	startDeadBlock();
 	lastValue = nullptr;
 }
@@ -940,7 +1222,8 @@ void CodeGenerator::visit(FunctionDeclExpr& node) {
 		llvm::Type* pointee = pointeeOf(paramDesc.type);
 		if (pointee && pointee->isStructTy()) pointee = nullptr;
 
-		scopes.back()[pname] = { slot, arg.getType(), st, pointee };
+		bool paramUnsigned = !paramDesc.type.isReference && paramDesc.type.isUnsignedInteger();
+		scopes.back()[pname] = { slot, arg.getType(), st, pointee, paramUnsigned };
 	}
 
 	emit(node.body.get());
@@ -961,22 +1244,23 @@ void CodeGenerator::visit(StructDeclExpr& node) {
 		it = structs.emplace(node.name, std::move(info)).first;
 	}
 
-	// Already defined (body set): do not append the metadata twice.
 	if (!it->second.type->isOpaque()) return;
 
 	StructInfo& info = it->second;
 	info.fieldNames.clear();
 	info.fieldIsRef.clear();
 	info.fieldPointee.clear();
+	info.fieldIsUnsigned.clear();
 
 	std::vector<llvm::Type*> fieldTypes;
 	for (const auto& f : node.attributes) {
-		llvm::Type* ft = mapType(f.type); // reference -> ptr
+		llvm::Type* ft = mapType(f.type);
 		if (!ft || ft->isVoidTy()) { error("Invalid type for field '" + f.name + "'"); return; }
 		fieldTypes.push_back(ft);
 		info.fieldNames.push_back(f.name);
 		info.fieldIsRef.push_back(f.type.isReference);
-		info.fieldPointee.push_back(pointeeOf(f.type)); // nullptr for non-reference fields
+		info.fieldPointee.push_back(pointeeOf(f.type));
+		info.fieldIsUnsigned.push_back(!f.type.isReference && f.type.isUnsignedInteger());
 	}
 	info.type->setBody(fieldTypes);
 }
@@ -1014,18 +1298,20 @@ void CodeGenerator::visit(StructCreateExpr& node) {
 		return;
 	}
 
-	// Entry-block alloca: no stack growth when this runs inside a loop.
 	llvm::AllocaInst* structAlloca = createEntryAlloca(currentFn, llvmStructTy, id->name + "_tmp");
 	builder.CreateStore(llvm::Constant::getNullValue(llvmStructTy), structAlloca);
 
 	for (size_t i = 0; i < node.arguments.size(); ++i) {
-		// Reference fields want an address, normal fields want a value.
+		llvm::Type* fieldTy = llvmStructTy->getElementType(i);
 		bool isRef = i < info.fieldIsRef.size() && info.fieldIsRef[i];
-		llvm::Value* argVal = isRef ? emitRef(node.arguments[i].get())
-		                            : emit(node.arguments[i].get());
+		bool isUns = i < info.fieldIsUnsigned.size() && info.fieldIsUnsigned[i] && fieldTy->isIntegerTy();
+
+		llvm::Value* argVal = isUns
+			? emitUnsignedValue(node.arguments[i].get(), fieldTy, "field '" + info.fieldNames[i] + "'")
+			: (isRef ? emitRef(node.arguments[i].get()) : emit(node.arguments[i].get()));
 		if (!argVal) return;
 
-		argVal = coerce(argVal, llvmStructTy->getElementType(i));
+		argVal = coerce(argVal, fieldTy);
 		if (!argVal) return;
 
 		llvm::Value* fieldPtr = builder.CreateStructGEP(llvmStructTy, structAlloca, i,
@@ -1041,12 +1327,12 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 
 	if (node.memberName == "length") {
 		llvm::Type* arrTy = nullptr;
-		
+
 		// 1. Check if the object is a direct array identifier (e.g., lstHuman.length)
 		if (auto* id = dynamic_cast<IdentifierExpr*>(node.object.get())) {
 			VarInfo* var = lookupVar(id->name);
 			if (var) arrTy = var->type;
-		} 
+		}
 		// 2. Check if the object is an array index expression (e.g., lstHuman[cptX].length)
 		else if (auto* aie = dynamic_cast<ArrayIndexExpr*>(node.object.get())) {
 			if (auto* baseId = dynamic_cast<IdentifierExpr*>(aie->array.get())) {
@@ -1104,12 +1390,19 @@ void CodeGenerator::visit(CallExpr& node) {
 					" argument(s), got " + std::to_string(node.arguments.size()));
 			return;
 		}
+		auto sg = fnSigns.find(callee->getName().str());
+
 		std::vector<llvm::Value*> args;
 		size_t i = 0;
 		for (auto& a : node.arguments) {
+			size_t argIdx = i;
 			llvm::Type* pt = callee->getFunctionType()->getParamType(i++);
-			// pointer parameter -> pass the address, never the dereferenced value
-			llvm::Value* v = pt->isPointerTy() ? emitRef(a.get()) : emit(a.get());
+
+			bool unsignedParam = sg != fnSigns.end() && argIdx < sg->second.paramUnsigned.size() &&
+				sg->second.paramUnsigned[argIdx] && pt->isIntegerTy();
+			llvm::Value* v = unsignedParam
+				? emitUnsignedValue(a.get(), pt, "parameter " + std::to_string(argIdx + 1))
+				: (pt->isPointerTy() ? emitRef(a.get()) : emit(a.get()));
 			if (!v) return;
 			// struct passed by value but we hold its address (temporary / reference)
 			if (pt->isStructTy() && v->getType()->isPointerTy())

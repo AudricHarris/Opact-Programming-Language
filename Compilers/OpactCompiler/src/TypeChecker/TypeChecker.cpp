@@ -1,6 +1,7 @@
 #include "TypeChecker.hpp"
 #include "../Parser/Ast.hpp"
 #include "../Parser/CompilerPipeline.hpp"
+#include "../Parser/RangeUtil.hpp"
 #include "Symbol/FunctionSymbol.hpp"
 #include "Symbol/StructSymbol.hpp"
 #include "Symbol/VarSymbol.hpp"
@@ -63,10 +64,67 @@ namespace {
 		}
 		return nullptr;
 	}
+
+	bool isUnsignedDesc(const TypeDesc& d) { return d.isUnsignedInteger(); }
+
+	// Sign of an integer constant: `5`, `-5`, `-(-5)`. Returns false if `e` is not one.
+	bool constIntSign(Expression* e, bool& negative, bool& isZero) {
+		if (auto* lit = dynamic_cast<LiteralExpr*>(e)) {
+			if (lit->kind != LiteralKind::Int) return false;
+			std::string t = tokenText(lit->lit);
+			negative = !t.empty() && t[0] == '-';
+			size_t i = negative ? 1 : 0;
+			if (i + 1 < t.size() && t[i] == '0' &&
+					std::string("xXoObB").find(t[i + 1]) != std::string::npos) i += 2;
+			isZero = true;
+			for (; i < t.size(); ++i)
+				if (t[i] != '0' && t[i] != '_') { isZero = false; break; }
+			if (isZero) negative = false; // -0 is 0
+			return true;
+		}
+		if (auto* un = dynamic_cast<UnaryExpr*>(e); un && un->op == UnaryOp::Negate) {
+			if (!constIntSign(un->expr.get(), negative, isZero)) return false;
+			if (!isZero) negative = !negative;
+			return true;
+		}
+		return false;
+	}
+
+	// Integer constant value (`5`, `-5`, `-(-5)`, 0x.., 0b..) that fits in i32.
+	bool constIntValue(Expression* e, long long& out) {
+		if (auto* lit = dynamic_cast<LiteralExpr*>(e)) {
+			if (lit->kind != LiteralKind::Int) return false;
+			std::string t = tokenText(lit->lit);
+			t.erase(std::remove(t.begin(), t.end(), '_'), t.end());
+
+			bool neg = !t.empty() && t[0] == '-';
+			size_t skip = neg ? 1 : 0;
+			int base = 10;
+			switch (lit->base) {
+				case NumericBase::Hexadecimal: base = 16; skip += 2; break;
+				case NumericBase::Octal:       base = 8;  skip += 2; break;
+				case NumericBase::Binary:      base = 2;  skip += 2; break;
+				default: break;
+			}
+			try {
+				unsigned long long m = std::stoull(t.substr(skip), nullptr, base);
+				if (m > (neg ? 2147483648ULL : 2147483647ULL)) return false;
+				out = neg ? -static_cast<long long>(m) : static_cast<long long>(m);
+			} catch (...) { return false; }
+			return true;
+		}
+		if (auto* un = dynamic_cast<UnaryExpr*>(e); un && un->op == UnaryOp::Negate) {
+			long long inner = 0;
+			if (!constIntValue(un->expr.get(), inner)) return false;
+			out = -inner;
+			return true;
+		}
+		return false;
+	}
 } // namespace
 
 TypeChecker::TypeChecker(CompilerPipeline* pipeline, const std::string& filePath)
-	: pipeline(pipeline), currentFilePath(filePath), currentType(prim(BuiltinType::Void)) 
+	: pipeline(pipeline), currentFilePath(filePath), currentType(prim(BuiltinType::Void))
 {
 	this->declareBuiltins();
 }
@@ -76,7 +134,7 @@ void TypeChecker::ShowErrorCount()
 	std::cerr << "Total error Count after TypeChecker : " << this->errorCount_ << "\n";
 }
 
-// Handling Built in functions 
+// Handling Built in functions
 struct BuiltinParam {
 	const char* name;
 	DataType type;
@@ -89,8 +147,10 @@ struct BuiltinInfo {
 };
 
 void TypeChecker::declareBuiltins() {
+	// Range / Random are NOT listed here: their result type depends on the
+	// call, so visit(CallExpr) handles them directly.
 	std::initializer_list<BuiltinInfo> builtins = {
-		{ "Printf", DataType::Void, { {"Text", DataType::Str} } },
+		{ "Printf",  DataType::Void, { {"Text", DataType::Str} } },
 		{ "Println", DataType::Void, { {"Text", DataType::Str} } },
 	};
 
@@ -152,6 +212,24 @@ void TypeChecker::reportError(const std::string& message) {
 	reportError(0, 0, message, "");
 }
 
+// Rejects negative integer constants, descending into (nested) array literals.
+void TypeChecker::checkNoNegativeConst(Expression& e, const std::string& what) {
+	if (auto* arr = dynamic_cast<ArrayLiteralExpr*>(&e)) {
+		for (auto& el : arr->elements)
+			if (el) checkNoNegativeConst(*el, what);
+		return;
+	}
+	bool neg = false, zero = false;
+	if (constIntSign(&e, neg, zero) && neg)
+		reportError(e.line, e.col, "Cannot assign a negative value to unsigned " + what,
+				"Unsigned types only hold values >= 0.");
+}
+
+bool TypeChecker::isUnsignedField(const std::string& s, const std::string& f) const {
+	auto it = unsignedFields_.find(s);
+	return it != unsignedFields_.end() && it->second.count(f);
+}
+
 std::string TypeChecker::escapingLocal(Expression& e) {
 	auto danglingOf = [&](IdentifierExpr* id) -> std::string {
 		if (!id) return "";
@@ -207,8 +285,23 @@ std::string TypeChecker::escapingLocal(Expression& e) {
 std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
 	std::shared_ptr<Type> baseType = prim(BuiltinType::Void);
 	switch (d.type) {
-		case DataType::Int:   baseType = prim(BuiltinType::Int);   break;
-		case DataType::Float: baseType = prim(BuiltinType::Float); break;
+		case DataType::I8:
+		case DataType::U8:
+		case DataType::I16:
+		case DataType::U16:
+		case DataType::I32:
+		case DataType::UInt:
+		case DataType::Int:
+		case DataType::I64:
+		case DataType::U32:
+		case DataType::U64:
+			baseType = prim(BuiltinType::Int);
+			break;
+		case DataType::F32:
+		case DataType::F64:
+		case DataType::Float:
+			baseType = prim(BuiltinType::Float);
+			break;
 		case DataType::Bool:  baseType = prim(BuiltinType::Bool);  break;
 		case DataType::Char:  baseType = prim(BuiltinType::Char);  break;
 		case DataType::Str:   baseType = prim(BuiltinType::Str);   break;
@@ -227,7 +320,6 @@ std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
 		}
 	}
 
-	// Wrap in ArrayType if dimensions are present (e.g. i32[5])
 	if (!d.dim.empty()) {
 		for (auto it = d.dim.rbegin(); it != d.dim.rend(); ++it) {
 			baseType = std::make_shared<ArrayType>(baseType, *it);
@@ -295,7 +387,7 @@ TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
 }
 
 std::shared_ptr<Type> TypeChecker::typeOf(Expression& node) {
-	currentType = prim(BuiltinType::Void); 
+	currentType = prim(BuiltinType::Void);
 	node.accept(*this);
 	return currentType ? currentType : prim(BuiltinType::Void);
 }
@@ -307,7 +399,7 @@ std::shared_ptr<Type> TypeChecker::valueTypeOf(Expression& node) {
 bool TypeChecker::isWritable(Expression& e) {
 	if (auto* id = dynamic_cast<IdentifierExpr*>(&e)) {
 		auto sym = scopeManager.lookup(id->name);
-		if (!sym) return true; 
+		if (!sym) return true;
 		auto ty = sym->getType();
 		if (isRefType(ty)) return static_cast<const ReferenceType*>(ty.get())->isMutable();
 		return true;
@@ -331,10 +423,13 @@ TypeDesc TypeChecker::check(Expression& node) {
 
 std::shared_ptr<FunctionType> TypeChecker::buildFunctionType(const FunctionDeclExpr& fn) {
 	std::vector<std::shared_ptr<Type>> params;
+	std::vector<bool> unsignedFlags;
 	params.reserve(fn.params.size());
 	for (const auto& p : fn.params) {
 		params.push_back(fromDesc(p.type));
+		unsignedFlags.push_back(isUnsignedDesc(p.type));
 	}
+	fnParamUnsigned_[fn.name] = std::move(unsignedFlags);
 	return std::make_shared<FunctionType>(fromDesc(fn.returnType), std::move(params));
 }
 
@@ -348,7 +443,8 @@ std::shared_ptr<StructType> TypeChecker::buildStructureType(const StructDeclExpr
 
 		size_t fieldOffset = currentOffset;
 
-		structure->addField(att.name, fieldType, fieldOffset); 
+		structure->addField(att.name, fieldType, fieldOffset);
+		if (isUnsignedDesc(att.type)) unsignedFields_[structures.name].insert(att.name);
 
 		currentOffset += fieldType->getSize();
 	}
@@ -384,7 +480,7 @@ void TypeChecker::initialize(const ExprPtr& m) {
 			}
 			else if (auto* structObj = dynamic_cast<StructDeclExpr*>(expr.get()))
 			{
-				this->declareStructures(*structObj); 
+				this->declareStructures(*structObj);
 			}
 		}
 	}
@@ -399,15 +495,19 @@ void TypeChecker::visit(FunctionDeclExpr& node) {
 	for (const auto& p : node.params) {
 		auto sym = std::make_shared<VarSymbol>(p.name, fromDesc(p.type), /*isInitialized=*/true);
 		localInfo_[sym.get()] = {};
+		if (isUnsignedDesc(p.type)) unsignedVars_.insert(sym.get());
 		if (!scopeManager.declare(p.name, sym)) {
 			reportError(node.line, node.col, "Duplicate parameter '" + p.name + "' in function " + node.name);
 		}
 	}
 
 	auto prevReturn = currentReturnType;
+	auto prevReturnUnsigned = currentReturnUnsigned_;
 	currentReturnType = fromDesc(node.returnType);
+	currentReturnUnsigned_ = isUnsignedDesc(node.returnType);
 	if (node.body) typeOf(*node.body);
 	currentReturnType = prevReturn;
+	currentReturnUnsigned_ = prevReturnUnsigned;
 
 	scopeManager.exitScope();
 	currentType = prim(BuiltinType::Void);
@@ -460,7 +560,7 @@ void TypeChecker::visit(StructCreateExpr& node)
 	}
 
 	auto* strct = static_cast<StructType*>(structType.get());
-	const auto& fields = strct->getOrderedFields(); 
+	const auto& fields = strct->getOrderedFields();
 
 	if (fields.size() != argTypes.size()) {
 		reportError(node.line, node.col, "Expected " + std::to_string(fields.size()) + " argument(s) but got " + std::to_string(argTypes.size()));
@@ -472,14 +572,20 @@ void TypeChecker::visit(StructCreateExpr& node)
 		}
 	}
 
-	currentType = structType; 
+	// Unsigned fields can't be initialised with a negative constant.
+	for (size_t i = 0; i < fields.size() && i < node.arguments.size(); ++i) {
+		if (node.arguments[i] && isUnsignedField(strct->getName(), fields[i].name))
+			checkNoNegativeConst(*node.arguments[i], "field '" + fields[i].name + "'");
+	}
+
+	currentType = structType;
 }
 
 void TypeChecker::visit(MemberAccessExpr &node)
 {
-	if (!node.object) { 
-		currentType = prim(BuiltinType::Void); 
-		return; 
+	if (!node.object) {
+		currentType = prim(BuiltinType::Void);
+		return;
 	}
 
 	auto baseType = typeOf(*node.object);
@@ -510,6 +616,7 @@ void TypeChecker::visit(MemberAccessExpr &node)
 		return;
 	}
 
+	if (isUnsignedField(strct->getName(), node.memberName)) unsignedExprs_.insert(&node);
 	currentType = field->type;
 }
 
@@ -528,6 +635,66 @@ bool isTypeCompatible(const std::shared_ptr<Type>& expected, const Type* actual)
 
 void TypeChecker::visit(CallExpr& node) {
 	if (!node.callee) { currentType = prim(BuiltinType::Void); return; }
+
+	// Compiler builtins whose result type depends on the call. A user-defined
+	// function with the same name wins (the lookup below would find it).
+	if (auto* id = dynamic_cast<IdentifierExpr*>(node.callee.get())) {
+		if (!scopeManager.lookup(id->name)) {
+
+			// Random() -> float in [0, 1)
+			if (id->name == "Random") {
+				if (!node.arguments.empty())
+					reportError(node.line, node.col, "Random takes no arguments");
+				currentType = prim(BuiltinType::Float);
+				return;
+			}
+
+			// Range(end) / Range(start, end) / Range(start, end, step) -> int[N]
+			if (id->name == "Range") {
+				size_t n = node.arguments.size();
+				currentType = prim(BuiltinType::Void);
+
+				if (n < 1 || n > 3) {
+					reportError(node.line, node.col,
+							"Range expects 1 to 3 arguments, got " + std::to_string(n));
+					return;
+				}
+
+				long long v[3] = { 0, 0, 1 };
+				bool ok = true;
+				for (size_t i = 0; i < n; ++i) {
+					if (!node.arguments[i]) { ok = false; continue; }
+					auto at = valueTypeOf(*node.arguments[i]);
+					if (!isPrim(at, BuiltinType::Int)) {
+						reportError(node.line, node.col, "Range arguments must be integers, got " + at->toString());
+						ok = false;
+					} else if (!constIntValue(node.arguments[i].get(), v[i])) {
+						reportError(node.line, node.col,
+								"Range arguments must be integer constants",
+								"The array length has to be known at compile time.");
+						ok = false;
+					}
+				}
+				if (!ok) return;
+
+				long long start = 0, end = 0, step = 1;
+				if (n == 1)      { end = v[0]; }
+				else if (n == 2) { start = v[0]; end = v[1]; }
+				else             { start = v[0]; end = v[1]; step = v[2]; }
+
+				long long count = 0;
+				std::string err;
+				if (!rangeLength(start, end, step, count, err)) {
+					reportError(node.line, node.col, err);
+					return;
+				}
+
+				currentType = std::make_shared<ArrayType>(prim(BuiltinType::Int),
+						static_cast<size_t>(count));
+				return;
+			}
+		}
+	}
 
 	auto calleeType = typeOf(*node.callee);
 
@@ -555,6 +722,19 @@ void TypeChecker::visit(CallExpr& node) {
 			}
 		}
 	}
+
+	// Unsigned parameters can't receive a negative constant.
+	if (auto* id = dynamic_cast<IdentifierExpr*>(node.callee.get())) {
+		auto it = fnParamUnsigned_.find(id->name);
+		if (it != fnParamUnsigned_.end()) {
+			for (size_t i = 0; i < node.arguments.size() && i < it->second.size(); ++i) {
+				if (it->second[i] && node.arguments[i])
+					checkNoNegativeConst(*node.arguments[i],
+							"parameter " + std::to_string(i + 1) + " of '" + id->name + "'");
+			}
+		}
+	}
+
 	currentType = fn->getReturnType();
 }
 
@@ -574,12 +754,16 @@ void TypeChecker::visit(ReturnExpr& node) {
 		std::string local = escapingLocal(**node.value);
 		if (!local.empty())
 			reportError(
-					node.line, 
-					node.col, 
+					node.line,
+					node.col,
 					"cannot return a value that references local variable '" + local + "'",
 					"local variable created here, but its scope ends when function returns."
 					);
 	}
+
+	if (currentReturnUnsigned_ && node.value && *node.value)
+		checkNoNegativeConst(**node.value, "return value");
+
 	currentType = prim(BuiltinType::Void);
 }
 
@@ -621,7 +805,6 @@ void TypeChecker::visit(ArrayIndexExpr& node) {
 		currentExprType = static_cast<const ReferenceType*>(currentExprType.get())->getInnerType();
 	}
 
-	// Iterate through each index in the vector (supports multi-dimensional indexing)
 	for (size_t i = 0; i < node.indices.size(); ++i) {
 		if (currentExprType->getKind() != TypeKind::Array) {
 			reportError(node.line, node.col, "Indexing applied to non-array type: " + currentExprType->toString());
@@ -638,9 +821,11 @@ void TypeChecker::visit(ArrayIndexExpr& node) {
 			}
 		}
 
-		// Advance to the inner type for the next dimension
 		currentExprType = arr->getElementType();
 	}
+
+	// Elements of an unsigned array are unsigned.
+	if (unsignedExprs_.count(node.array.get())) unsignedExprs_.insert(&node);
 
 	currentType = currentExprType;
 }
@@ -652,11 +837,13 @@ void TypeChecker::visit(IdentifierExpr& node) {
 		currentType = prim(BuiltinType::Void);
 		return;
 	}
+	if (unsignedVars_.count(symbol.get())) unsignedExprs_.insert(&node);
 	currentType = symbol->getType();
 }
 
 void TypeChecker::visit(VarDeclExpr& node) {
 	auto declared = fromDesc(node.type);
+	bool declUnsigned = isUnsignedDesc(node.type);
 
 	if (node.expr) {
 		bool keepRef = node.type.isReference || dynamic_cast<BorrowExpr*>(node.expr.get());
@@ -664,16 +851,21 @@ void TypeChecker::visit(VarDeclExpr& node) {
 		if (isPrim(declared, BuiltinType::Void)) {
 			if (isRefType(initType))
 				reportError(node.line, node.col, "Reference variable '" + tokenText(node.name) + "' needs an explicit type, e.g. &mut int " + tokenText(node.name));
-			declared = initType; 
+			declared = initType;
 		} else if (!isTypeCompatible(declared, initType.get())) {
 			reportError(node.line, node.col, "Type mismatch in declaration of " + tokenText(node.name) + ": expected " + declared->toString() + " but got " + initType->toString());
 		}
+
+		if (declUnsigned)
+			checkNoNegativeConst(*node.expr, "variable '" + tokenText(node.name) + "'");
 	}
 
 	auto sym = std::make_shared<VarSymbol>(tokenText(node.name), declared, node.expr != nullptr);
 	if (!scopeManager.declare(tokenText(node.name), sym)) {
 		reportError(node.line, node.col, "Redeclaration of variable: " + tokenText(node.name));
 	}
+	if (declUnsigned) unsignedVars_.insert(sym.get());
+
 	std::string dangling;
 	if (node.expr && carriesReference(declared))
 		dangling = escapingLocal(*node.expr);
@@ -730,6 +922,12 @@ void TypeChecker::visit(BinaryExpr& node) {
 			currentType = prim(BuiltinType::Int);
 			break;
 	}
+
+	// Unsignedness flows through arithmetic.
+	bool arith = node.op == BinaryOp::Add || node.op == BinaryOp::Sub || node.op == BinaryOp::Mul ||
+	             node.op == BinaryOp::Div || node.op == BinaryOp::Mod || node.op == BinaryOp::Power;
+	if (arith && (unsignedExprs_.count(node.left.get()) || unsignedExprs_.count(node.right.get())))
+		unsignedExprs_.insert(&node);
 }
 
 void TypeChecker::visit(UnaryExpr& node) {
@@ -739,6 +937,9 @@ void TypeChecker::visit(UnaryExpr& node) {
 	switch (node.op) {
 		case UnaryOp::Negate:
 			if (!isNumeric(t)) reportError(node.line, node.col, "Cannot negate " + t->toString());
+			if (unsignedExprs_.count(node.expr.get()))
+				reportError(node.line, node.col, "Cannot negate an unsigned value",
+						"Cast it to a signed type first.");
 			currentType = t;
 			break;
 		case UnaryOp::Not:
@@ -755,7 +956,7 @@ void TypeChecker::visit(Block& node) {
 		if (expr) last = typeOf(*expr);
 	}
 	scopeManager.exitScope();
-	currentType = last; 
+	currentType = last;
 }
 
 void TypeChecker::visit(IfExpr& node) {
@@ -837,7 +1038,6 @@ void TypeChecker::visit(ImportExpr& node) {
 		}
 	}
 
-	reportError(node.line, node.col, "The imported module " + actualPath + " doesn't exist");
 	currentType = prim(BuiltinType::Void);
 }
 
@@ -845,6 +1045,7 @@ void TypeChecker::visit(CastExpr& node) {
 	if (!node.expr) { currentType = prim(BuiltinType::Void); return; }
 
 	auto t = fromDesc(node.castType);
+	if (isUnsignedDesc(node.castType)) unsignedExprs_.insert(&node);
 	currentType = t;
 }
 
@@ -862,6 +1063,17 @@ void TypeChecker::visit(AssignExpr& node) {
 	if (!targetType->equals(valueType.get())) {
 		reportError(node.line, node.col, "Cannot assign " + valueType->toString() + " to " + targetType->toString());
 	}
+
+	// Assigning a negative constant to an unsigned target.
+	if (unsignedExprs_.count(node.target.get())) {
+		std::string what = "variable";
+		if (auto* id = dynamic_cast<IdentifierExpr*>(node.target.get()))
+			what = "variable '" + id->name + "'";
+		else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.target.get()))
+			what = "field '" + ma->memberName + "'";
+		checkNoNegativeConst(*node.value, what);
+	}
+
 	currentType = targetType;
 }
 
