@@ -648,6 +648,14 @@ void TypeChecker::visit(CallExpr& node) {
 				currentType = prim(BuiltinType::Float);
 				return;
 			}
+		
+			// Read() -> outputs typed string
+			if (id->name == "Read") {
+				if (!node.arguments.empty())
+					reportError(node.line, node.col, "Random takes no arguments");
+				currentType = prim(BuiltinType::Str);
+				return;
+			}
 
 			// Range(end) / Range(start, end) / Range(start, end, step) -> int[N]
 			if (id->name == "Range") {

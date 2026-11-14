@@ -10,6 +10,7 @@ void CodeGenerator::registerBuiltins() {
 	registerBuiltin("Println", [this](CallExpr& c) { return emitFormatted(c, /*newline=*/true);  });
 	registerBuiltin("Range",   [this](CallExpr& c) { return emitRange(c); });
 	registerBuiltin("Random",  [this](CallExpr& c) { return emitRandom(c); });
+	registerBuiltin("Read",    [this](CallExpr& c) { return emitRead(c); });
 
 	registerExternal("Exit", "exit", voidTy, { i32 });
 	registerExternal("Puts", "puts", i32,    { ptr });
@@ -268,4 +269,42 @@ llvm::Value* CodeGenerator::emitRandom(CallExpr& call) {
 	llvm::Value* asDouble = builder.CreateSIToFP(masked, builder.getDoubleTy(), "rand_f");
 	return builder.CreateFDiv(asDouble,
 			llvm::ConstantFP::get(builder.getDoubleTy(), 2147483648.0), "rand_unit");
+}
+
+llvm::Value* CodeGenerator::emitRead(CallExpr& call) {
+	if (!currentFn) { error("Read used outside of a function"); return nullptr; }
+	if (!call.arguments.empty()) { error("Read takes no arguments"); return nullptr; }
+
+	llvm::Type* i8 = builder.getInt8Ty();
+	llvm::Type* i32 = builder.getInt32Ty();
+	llvm::Type* ptr = builder.getPtrTy();
+
+	auto fgetsFn = module->getOrInsertFunction("fgets",
+			llvm::FunctionType::get(ptr, { ptr, i32, ptr }, false));
+
+	auto stdinGlobal = module->getNamedGlobal("stdin");
+	if (!stdinGlobal) {
+		stdinGlobal = new llvm::GlobalVariable(
+				*module, ptr, false, llvm::GlobalValue::ExternalLinkage,
+				nullptr, "stdin"
+				);
+	}
+
+	// Allocate a buffer on the stack for the input string (e.g., 256 bytes)
+	const unsigned bufferSize = 256;
+	llvm::ArrayType* bufferType = llvm::ArrayType::get(i8, bufferSize);
+	llvm::AllocaInst* bufferAlloca = createEntryAlloca(currentFn, bufferType, "read_buf");
+
+	// Get pointer to the start of the buffer (decay array to pointer)
+	llvm::Value* zero = llvm::ConstantInt::get(i32, 0);
+	llvm::Value* bufPtr = builder.CreateInBoundsGEP(bufferType, bufferAlloca, { zero, zero }, "buf_ptr");
+
+	// Load the stdin pointer
+	llvm::Value* stdinVal = builder.CreateLoad(ptr, stdinGlobal, "stdin_val");
+
+	// Call fgets(buf, 256, stdin)
+	llvm::Value* sizeArg = llvm::ConstantInt::get(i32, bufferSize);
+	builder.CreateCall(fgetsFn, { bufPtr, sizeArg, stdinVal });
+
+	return bufPtr;
 }

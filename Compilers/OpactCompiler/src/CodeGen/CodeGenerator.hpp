@@ -182,6 +182,7 @@ private:
 	llvm::Value* emitFormatted(CallExpr& call, bool newline);
 	llvm::Value* emitRange(CallExpr& call);
 	llvm::Value* emitRandom(CallExpr& call);
+	llvm::Value* emitRead(CallExpr& call);
 	bool constI32(Expression* e, long long& out);
 
 	//----------------------------------------------------------------------//
