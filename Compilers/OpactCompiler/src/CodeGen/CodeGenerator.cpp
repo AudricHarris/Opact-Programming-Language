@@ -107,6 +107,24 @@ llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 		return builder.CreateLoad(to, v, "struct_coerce_load");
 	}
 
+	if (from->isPointerTy() && to->isIntegerTy()) {
+		if (to->isIntegerTy(1)) return toBool(v);
+		if (!currentFn) {
+			error("String-to-int conversion outside of a function");
+			return nullptr;
+		}
+		auto atoiFn = module->getOrInsertFunction(
+				"atoi", llvm::FunctionType::get(builder.getInt32Ty(), { builder.getPtrTy() }, false));
+		llvm::Value* strPtr = builder.CreatePointerCast(v, builder.getPtrTy(), "atoi_str");
+		llvm::Value* parsed = builder.CreateCall(atoiFn, { strPtr }, "atoi_call");
+		if (parsed->getType() != to) {
+			parsed = (to->getIntegerBitWidth() < 32)
+				? builder.CreateTrunc(parsed, to, "atoi_trunc")
+				: builder.CreateSExt(parsed, to, "atoi_sext");
+		}
+		return parsed;
+	}
+
 	error("Cannot convert between these types");
 	return nullptr;
 }
@@ -235,7 +253,7 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 		return var->addr;
 	}
 
-	// 2. Array Index (e.g., `lstHuman[3]`)
+	// 2. Array Index (e.g., `lstHuman[3]` or `game.map[row][col]`)
 	if (auto* aie = dynamic_cast<ArrayIndexExpr*>(e)) {
 		if (!aie->array || aie->indices.empty()) return nullptr;
 		llvm::Value* currentPtr = nullptr;
@@ -249,8 +267,11 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 			}
 			currentPtr = var->addr;
 			currentTy = var->type;
+		} else if (auto* ma = dynamic_cast<MemberAccessExpr*>(aie->array.get())) {
+			if (!emitFieldAddr(*ma, currentPtr, currentTy)) return nullptr;
 		} else {
 			currentPtr = emitRef(aie->array.get());
+			currentTy = currentPtr ? currentPtr->getType() : nullptr;
 		}
 
 		if (!currentPtr || !currentTy) return nullptr;
@@ -271,7 +292,7 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 		return currentPtr; // Returns the pointer to the element without loading it
 	}
 
-	// 3. Member Access (e.g., `human.age`)
+	// 3. Member Access (e.g., `human.age` or `game.map[row].adjacentBombs`)
 	if (auto* mae = dynamic_cast<MemberAccessExpr*>(e)) {
 		llvm::Value* addr = nullptr;
 		llvm::Type* ty = nullptr;
@@ -481,15 +502,23 @@ bool CodeGenerator::emitFieldAddr(MemberAccessExpr& ma, llvm::Value*& addr, llvm
 		}
 	}
 	else if (auto* aie = dynamic_cast<ArrayIndexExpr*>(ma.object.get())) {
-		objPtr = emitLValue(aie); // Get the pointer to the struct element
+		objPtr = emitLValue(aie);
 
+		llvm::Type* arrTy = nullptr;
 		if (auto* baseId = dynamic_cast<IdentifierExpr*>(aie->array.get())) {
-			VarInfo* var = lookupVar(baseId->name);
-			if (var && var->type->isArrayTy()) {
-				llvm::ArrayType* arrTy = llvm::cast<llvm::ArrayType>(var->type);
-				llvm::Type* elemTy = arrTy->getElementType();
-				structTy = llvm::dyn_cast<llvm::StructType>(elemTy);
+			if (VarInfo* var = lookupVar(baseId->name)) arrTy = var->type;
+		} else if (auto* baseMa = dynamic_cast<MemberAccessExpr*>(aie->array.get())) {
+			llvm::Value* tmpAddr = nullptr;
+			llvm::Type* tmpTy = nullptr;
+			if (emitFieldAddr(*baseMa, tmpAddr, tmpTy)) arrTy = tmpTy;
+		}
+		for (size_t i = 0; i < aie->indices.size() && arrTy; ++i) {
+			if (arrTy->isArrayTy()) {
+				arrTy = llvm::cast<llvm::ArrayType>(arrTy)->getElementType();
 			}
+		}
+		if (arrTy) {
+			structTy = llvm::dyn_cast<llvm::StructType>(arrTy);
 		}
 	}
 	else {
@@ -817,8 +846,17 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 		}
 		currentPtr = var->addr; // This is the alloca pointer ([N x T]*)
 		currentTy = var->type;  // This is the array type ([N x T])
+	} else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.array.get())) {
+		llvm::Value* fieldAddr = nullptr;
+		llvm::Type* fieldTy = nullptr;
+		if (!emitFieldAddr(*ma, fieldAddr, fieldTy)) {
+			return;
+		}
+		currentPtr = fieldAddr;
+		currentTy = fieldTy;
 	} else {
 		currentPtr = emitRef(node.array.get());
+		currentTy = getExprType(node.array.get());
 	}
 
 	if (!currentPtr || !currentTy) {
@@ -953,8 +991,30 @@ void CodeGenerator::visit(AssignExpr& node) {
 		if (!emitFieldAddr(*ma, targetPtr, targetType)) return;
 		targetUnsigned = isUnsignedExpr(ma);
 	}
+	else if (auto* aie = dynamic_cast<ArrayIndexExpr*>(node.target.get())) {
+		targetPtr = emitLValue(aie);
+		if (!targetPtr) return;
+
+		llvm::Type* elemTy = nullptr;
+		if (auto* baseId = dynamic_cast<IdentifierExpr*>(aie->array.get())) {
+			if (VarInfo* var = lookupVar(baseId->name)) elemTy = var->type;
+		} else if (auto* baseMa = dynamic_cast<MemberAccessExpr*>(aie->array.get())) {
+			llvm::Value* tmpAddr = nullptr;
+			if (!emitFieldAddr(*baseMa, tmpAddr, elemTy)) return;
+		}
+		for (size_t i = 0; i < aie->indices.size() && elemTy; ++i) {
+			if (elemTy->isArrayTy()) elemTy = llvm::cast<llvm::ArrayType>(elemTy)->getElementType();
+		}
+		targetType = elemTy;
+		targetUnsigned = isUnsignedExpr(aie);
+	}
 	else {
 		error("Only variables or structure fields can be assigned to");
+		return;
+	}
+
+	if (!targetType) {
+		error("Could not resolve target type for assignment");
 		return;
 	}
 
@@ -1306,14 +1366,23 @@ void CodeGenerator::visit(StructCreateExpr& node) {
 		bool isRef = i < info.fieldIsRef.size() && info.fieldIsRef[i];
 		bool isUns = i < info.fieldIsUnsigned.size() && info.fieldIsUnsigned[i] && fieldTy->isIntegerTy();
 
-		llvm::Value* argVal = isUns
-			? emitUnsignedValue(node.arguments[i].get(), fieldTy, "field '" + info.fieldNames[i] + "'")
-			: (isRef ? emitRef(node.arguments[i].get()) : emit(node.arguments[i].get()));
-		if (!argVal) return;
+		llvm::Value* argVal = nullptr;
+		bool isSkip = false;
+		if (auto* skipId = dynamic_cast<IdentifierExpr*>(node.arguments[i].get()); skipId && skipId->name == "_") {
+			isSkip = true;
+		}
 
-		argVal = coerce(argVal, fieldTy);
-		if (!argVal) return;
+		if (isSkip) {
+			argVal = llvm::Constant::getNullValue(fieldTy);
+		} else {
+			argVal = isUns
+				? emitUnsignedValue(node.arguments[i].get(), fieldTy, "field '" + info.fieldNames[i] + "'")
+				: (isRef ? emitRef(node.arguments[i].get()) : emit(node.arguments[i].get()));
+			if (!argVal) return;
 
+			argVal = coerce(argVal, fieldTy);
+			if (!argVal) return;
+		}
 		llvm::Value* fieldPtr = builder.CreateStructGEP(llvmStructTy, structAlloca, i,
 				id->name + "_field_" + std::to_string(i));
 		builder.CreateStore(argVal, fieldPtr);
@@ -1346,7 +1415,24 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 						}
 					}
 				}
+			} else if (auto* baseMa = dynamic_cast<MemberAccessExpr*>(aie->array.get())) {
+				llvm::Value* tmpAddr = nullptr;
+				llvm::Type* tmpTy = nullptr;
+				if (emitFieldAddr(*baseMa, tmpAddr, tmpTy)) {
+					arrTy = tmpTy;
+					for (size_t i = 0; i < aie->indices.size() && arrTy; ++i) {
+						if (arrTy->isArrayTy()) {
+							arrTy = llvm::cast<llvm::ArrayType>(arrTy)->getElementType();
+						}
+					}
+				}
 			}
+		}
+		// 3. Check if the object is a struct member (e.g., game.map.length)
+		else if (auto* baseMa = dynamic_cast<MemberAccessExpr*>(node.object.get())) {
+			llvm::Value* tmpAddr = nullptr;
+			llvm::Type* tmpTy = nullptr;
+			if (emitFieldAddr(*baseMa, tmpAddr, tmpTy)) arrTy = tmpTy;
 		}
 
 		// If we successfully resolved a multi-dimensional or 1D array type, return its compile-time size
@@ -1356,7 +1442,7 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 			return;
 		}
 
-		// 3. Fallback: Check if it's a string type (emits a runtime strlen call)
+		// 4. Fallback: Check if it's a string type (emits a runtime strlen call)
 		llvm::Value* objVal = emit(node.object.get());
 		if (objVal && objVal->getType()->isPointerTy()) {
 			auto sizeTy = builder.getInt64Ty();
@@ -1368,7 +1454,7 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 		}
 	}
 
-	// 4. Fallback to regular structure field access
+	// 5. Fallback to regular structure field access
 	llvm::Value* addr = nullptr;
 	llvm::Type* ty = nullptr;
 	if (!emitFieldAddr(node, addr, ty)) return;

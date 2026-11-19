@@ -289,6 +289,22 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 		}
 
 		Token ptypeTok = this->expect(TokenKind::IDENTIFIER, "Expected type for the param");
+
+		TypeDesc ptype;
+		ptype.type = determineType(ptypeTok);
+		ptype.customTypeName = ptypeTok.getWord();
+		ptype.isReference = isRef;
+		ptype.isMutable = isMut;
+
+		// Parse optional array dimensions like [20][20]
+		while (this->match(TokenKind::LBRACKET))
+		{
+			Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size inside brackets []");
+			int dimensionSize = std::stoi(sizeTok.getWord());
+			ptype.dim.push_back(dimensionSize);
+			this->expect(TokenKind::RBRACKET, "Expected closing ']' after array size");
+		}
+
 		Token pnameTok = this->expect(TokenKind::IDENTIFIER, "Expected name for the param");
 
 		std::optional<ExprPtr> defaultVal = std::nullopt;
@@ -297,13 +313,7 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 			defaultVal = this->parseExpression();
 		}
 
-		TypeDesc ptype;
-		ptype.type = determineType(ptypeTok);
-		ptype.customTypeName = ptypeTok.getWord();
-		ptype.isReference = isRef;
-		ptype.isMutable = isMut;
-
-		this->consume(); // Point virgule
+		this->expect(TokenKind::SEMI, "Expected ';' after struct field");
 		fields.emplace_back(pnameTok.getWord(), std::move(ptype), isRef, isMut, std::move(defaultVal));
 	}
 	while (!this->match(TokenKind::RBRACE));
@@ -757,13 +767,13 @@ ExprPtr Parser::parseOr()
 ExprPtr Parser::parseAnd()
 {
 	auto expr = this->parseEquality();
-	while (this->check(TokenKind::AND) || this->check(TokenKind::DOUBLE_AND))
+	while (this->check(TokenKind::DOUBLE_AND) || this->check(TokenKind::AND))
 	{
 		BinaryOp op = BinaryOp::And;
-		if (this->match(TokenKind::DOUBLE_AND)) 
+		if (this->match(TokenKind::DOUBLE_AND))
+			op = BinaryOp::And;
+		else if (this->match(TokenKind::AND))
 			op = BinaryOp::BitAnd;
-		else 
-			this->consume();
 
 		expr = std::make_unique<BinaryExpr>(op, std::move(expr), this->parseEquality());
 	}
@@ -911,13 +921,19 @@ ExprPtr Parser::parsePostfix(ExprPtr expr)
 			expr = this->parseCallExpr(std::move(expr));
 			continue;
 		}
+
 		// 4. Structure/Class defining
 		if (this->match(TokenKind::LBRACE)){
 			std::vector<ExprPtr> args;
 			if (!this->check(TokenKind::RBRACE))
 			{
 				do {
-					args.push_back(this->parseExpression());
+					if (this->check(TokenKind::IDENTIFIER) && this->peek().getWord() == "_") {
+						Token skipTok = this->consume();
+						args.push_back(makeNode<IdentifierExpr>(skipTok, "_"));
+					} else {
+						args.push_back(this->parseExpression());
+					}
 				} while (this->match(TokenKind::COMMA));
 			}
 			this->expect(TokenKind::RBRACE, "Expected '}' after structure arguments");

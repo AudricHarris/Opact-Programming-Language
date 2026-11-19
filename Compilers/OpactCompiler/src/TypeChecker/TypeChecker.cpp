@@ -407,10 +407,16 @@ bool TypeChecker::isWritable(Expression& e) {
 	if (auto* ma = dynamic_cast<MemberAccessExpr*>(&e)) {
 		if (!ma->object) return false;
 		Expression& obj = *ma->object;
-		if (dynamic_cast<IdentifierExpr*>(&obj) || dynamic_cast<MemberAccessExpr*>(&obj))
+		if (dynamic_cast<IdentifierExpr*>(&obj) ||
+		    dynamic_cast<MemberAccessExpr*>(&obj) ||
+		    dynamic_cast<ArrayIndexExpr*>(&obj))
 			return isWritable(obj);
 		auto ty = typeOf(obj);
 		return isRefType(ty) && static_cast<const ReferenceType*>(ty.get())->isMutable();
+	}
+	if (auto* ai = dynamic_cast<ArrayIndexExpr*>(&e)) {
+		if (!ai->array) return false;
+		return isWritable(*ai->array);
 	}
 	return false;
 }
@@ -548,10 +554,6 @@ void TypeChecker::visit(StructCreateExpr& node)
 	if (!node.structObj) { currentType = prim(BuiltinType::Void); return; }
 
 	auto structType = typeOf(*node.structObj);
-	std::vector<std::shared_ptr<Type>> argTypes;
-	for (auto& arg : node.arguments) {
-		if (arg) argTypes.push_back(typeOf(*arg));
-	}
 
 	if (structType->getKind() != TypeKind::Struct) {
 		reportError(node.line, node.col, "Called expression is not a structure");
@@ -561,6 +563,28 @@ void TypeChecker::visit(StructCreateExpr& node)
 
 	auto* strct = static_cast<StructType*>(structType.get());
 	const auto& fields = strct->getOrderedFields();
+
+	std::vector<std::shared_ptr<Type>> argTypes;
+	argTypes.reserve(node.arguments.size());
+
+	for (size_t i = 0; i < node.arguments.size(); ++i) {
+		if (!node.arguments[i]) continue;
+
+		bool isSkip = false;
+		if (auto* id = dynamic_cast<IdentifierExpr*>(node.arguments[i].get()); id && id->name == "_") {
+			isSkip = true;
+		}
+
+		if (isSkip) {
+			if (i < fields.size()) {
+				argTypes.push_back(fields[i].type);
+			} else {
+				argTypes.push_back(prim(BuiltinType::Void));
+			}
+		} else {
+			argTypes.push_back(typeOf(*node.arguments[i]));
+		}
+	}
 
 	if (fields.size() != argTypes.size()) {
 		reportError(node.line, node.col, "Expected " + std::to_string(fields.size()) + " argument(s) but got " + std::to_string(argTypes.size()));
@@ -574,7 +598,11 @@ void TypeChecker::visit(StructCreateExpr& node)
 
 	// Unsigned fields can't be initialised with a negative constant.
 	for (size_t i = 0; i < fields.size() && i < node.arguments.size(); ++i) {
-		if (node.arguments[i] && isUnsignedField(strct->getName(), fields[i].name))
+		if (!node.arguments[i]) continue;
+		if (auto* id = dynamic_cast<IdentifierExpr*>(node.arguments[i].get()); id && id->name == "_") {
+			continue;
+		}
+		if (isUnsignedField(strct->getName(), fields[i].name))
 			checkNoNegativeConst(*node.arguments[i], "field '" + fields[i].name + "'");
 	}
 
