@@ -383,9 +383,9 @@ bool Parser::parseIsVarDecl()
 	}
 	index++;
 
-	// 4. Confirm it's a declaration by checking for an assignment '=' or statement terminator ';'
+// 4. Confirm it's a declaration by checking for '=', ';', or ':' in a for-each header
 	TokenKind nextKind = this->peekAt(index).getKind();
-	return (nextKind == TokenKind::ASSIGN || nextKind == TokenKind::SEMI);
+	return (nextKind == TokenKind::ASSIGN || nextKind == TokenKind::SEMI || nextKind == TokenKind::COLON);
 }
 
 ExprPtr Parser::parseFunction(std::optional<Token> visib)
@@ -541,6 +541,9 @@ ExprPtr Parser::parseExpression()
 	if (this->check(TokenKind::WHILE))
 		return this->parseWhile();
 
+	if (this->check(TokenKind::FOR))
+		return this->parseFor();
+
 	if (this->check(TokenKind::LOOP))
 		return this->parseLoop();
 
@@ -610,6 +613,21 @@ ExprPtr Parser::parseWhile()
 	return makeNode<WhileExpr>(tok, std::move(condition), std::move(loopBranch));
 }
 
+ExprPtr Parser::parseFor()
+{
+	Token tok = this->peek();
+	this->expect(TokenKind::FOR, "Expected 'for' at the start of a for expression");
+	this->expect(TokenKind::LPAREN, "Expected '(' after 'for'");
+
+	ExprPtr itemDecl = this->parseExpression();
+	this->expect(TokenKind::COLON, "Expected ':' in for-each loop");
+	ExprPtr iterable = this->parseExpression();
+
+	this->expect(TokenKind::RPAREN, "Expected ')' after for-each header");
+	ExprPtr body = this->parseBlock();
+
+	return makeNode<ForExpr>(tok, std::move(itemDecl), std::move(iterable), std::move(body));
+}
 
 ExprPtr Parser::parseLoop()
 {

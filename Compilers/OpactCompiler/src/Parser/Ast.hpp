@@ -371,6 +371,32 @@ struct WhileExpr : Expression {
 	[[nodiscard]] virtual bool requiresSemicolon() const override { return false; }
 };
 
+struct ForExpr : Expression {
+	ExprPtr itemDecl;
+	ExprPtr iterable;
+	ExprPtr body;
+
+	ForExpr(ExprPtr itemDecl = nullptr, ExprPtr iterable = nullptr, ExprPtr body = nullptr)
+		: itemDecl(std::move(itemDecl)),
+		  iterable(std::move(iterable)),
+		  body(std::move(body)) {}
+
+	void accept(ASTVisitor& visitor) override;
+
+	[[nodiscard]] ExprPtr clone() const override {
+		auto cloned = std::make_unique<ForExpr>(
+			itemDecl ? itemDecl->clone() : nullptr,
+			iterable ? iterable->clone() : nullptr,
+			body ? body->clone() : nullptr
+		);
+		cloned->line = line;
+		cloned->col = col;
+		return cloned;
+	}
+
+	[[nodiscard]] bool requiresSemicolon() const override { return false; }
+};
+
 struct LoopExpr : Expression {
 	ExprPtr loopBranch;
 
@@ -576,6 +602,7 @@ struct ASTVisitor {
 	virtual void visit(Block& node) = 0;
 	virtual void visit(IfExpr& node) = 0;
 	virtual void visit(WhileExpr& node) = 0;
+	virtual void visit(ForExpr& node) = 0;
 	virtual void visit(LoopExpr& node) = 0;
 	virtual void visit(MemberAccessExpr& node) = 0;
 	virtual void visit(ArrayIndexExpr& node) = 0;
@@ -609,6 +636,7 @@ inline void VarDeclExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void Block::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void IfExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void WhileExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+inline void ForExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void LoopExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void MemberAccessExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void ArrayIndexExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }

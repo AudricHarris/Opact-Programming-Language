@@ -1024,6 +1024,37 @@ void TypeChecker::visit(WhileExpr& node) {
 	currentType = prim(BuiltinType::Void);
 }
 
+void TypeChecker::visit(ForExpr& node) {
+	scopeManager.enterScope();
+
+	std::shared_ptr<Type> elemType = nullptr;
+	if (node.itemDecl) {
+		elemType = typeOf(*node.itemDecl);
+	}
+
+	if (node.iterable) {
+		auto iterType = valueTypeOf(*node.iterable);
+
+		if (auto arrType = std::dynamic_pointer_cast<ArrayType>(iterType)) {
+			if (elemType && !elemType->equals(arrType->getElementType().get())) {
+				reportError(node.line, node.col,
+					"For loop variable type " + elemType->toString() +
+					" does not match iterable element type " + arrType->getElementType()->toString());
+			}
+			if (unsignedExprs_.count(node.iterable.get()) && node.itemDecl) {
+				unsignedExprs_.insert(node.itemDecl.get());
+			}
+		}
+	}
+
+	if (node.body) {
+		typeOf(*node.body);
+	}
+
+	scopeManager.exitScope();
+	currentType = prim(BuiltinType::Void);
+}
+
 void TypeChecker::visit(LoopExpr& node) {
 	if (node.loopBranch) typeOf(*node.loopBranch);
 	currentType = prim(BuiltinType::Void);

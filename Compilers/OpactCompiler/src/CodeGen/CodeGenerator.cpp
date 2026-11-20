@@ -1187,6 +1187,153 @@ void CodeGenerator::visit(WhileExpr& node) {
 	lastValue = nullptr;
 }
 
+void CodeGenerator::visit(ForExpr& node) {
+	if (!node.iterable || !node.body || !currentFn) {
+		lastValue = nullptr;
+		return;
+	}
+
+	pushScope();
+	scopes.emplace_back();
+
+	llvm::Value* iterVal = emit(node.iterable.get());
+	if (!iterVal) {
+		scopes.pop_back();
+		popScope();
+		lastValue = nullptr;
+		return;
+	}
+
+	llvm::Type* iterTy = iterVal->getType();
+
+	// Determine loop bounds & element type.
+	llvm::Value* startVal = nullptr;
+	llvm::Value* endVal   = nullptr;
+	llvm::Type*  elemTy   = nullptr;
+	llvm::Value* dataBase = nullptr; // Non-null when indexing into an array/buffer.
+
+	if (iterTy->isArrayTy()) {
+		uint64_t count = iterTy->getArrayNumElements();
+		elemTy = iterTy->getArrayElementType();
+
+		// Spill array value to an alloca so we can GEP element [0, idx].
+		auto* arrAlloca = createEntryAlloca(currentFn, iterTy, "forarr");
+		builder.CreateStore(iterVal, arrAlloca);
+		dataBase = arrAlloca;
+
+		llvm::Type* idxTy = llvm::Type::getInt64Ty(context);
+		startVal = llvm::ConstantInt::get(idxTy, 0);
+		endVal   = llvm::ConstantInt::get(idxTy, count);
+	} else if (auto* structTy = llvm::dyn_cast<llvm::StructType>(iterTy);
+	           structTy && structTy->getName().starts_with("Range")) {
+		llvm::Value* rangeAlloca = iterVal->getType()->isPointerTy() ? iterVal : nullptr;
+		if (!rangeAlloca) {
+			rangeAlloca = createEntryAlloca(currentFn, structTy, "forrange");
+			builder.CreateStore(iterVal, rangeAlloca);
+		}
+		llvm::Type* boundTy = structTy->getElementType(0);
+		startVal = builder.CreateLoad(boundTy, builder.CreateStructGEP(structTy, rangeAlloca, 0), "rangestart");
+		endVal   = builder.CreateLoad(boundTy, builder.CreateStructGEP(structTy, rangeAlloca, 1), "rangeend");
+		elemTy   = boundTy;
+	} else {
+		error("Unsupported iterable type in for loop");
+		scopes.pop_back();
+		popScope();
+		lastValue = nullptr;
+		return;
+	}
+
+	llvm::Type* idxTy = startVal->getType();
+	auto* idxAlloca = createEntryAlloca(currentFn, idxTy, "foridx");
+	builder.CreateStore(startVal, idxAlloca);
+
+	llvm::Value* elemAddr   = nullptr;
+	llvm::Type*  elemSlotTy = nullptr;
+
+	if (auto* decl = dynamic_cast<VarDeclExpr*>(node.itemDecl.get())) {
+		elemSlotTy = elemTy ? elemTy : mapType(decl->type);
+		auto* allocaInst = createEntryAlloca(currentFn, elemSlotTy, decl->name.getWord());
+		elemAddr = allocaInst;
+
+		VarInfo info;
+		info.addr = allocaInst;
+		info.type = elemSlotTy;
+		info.isUnsigned = decl->type.isReference ? false : (decl->type.type == DataType::U8 ||
+			decl->type.type == DataType::U16 || decl->type.type == DataType::U32 ||
+			decl->type.type == DataType::U64);
+		if (auto* st = llvm::dyn_cast<llvm::StructType>(elemSlotTy)) {
+			info.structType = st;
+		}
+		scopes.back()[decl->name.getWord()] = info;
+	} else if (auto* ident = dynamic_cast<IdentifierExpr*>(node.itemDecl.get())) {
+		VarInfo* existing = lookupVar(ident->name);
+		if (!existing) {
+			error("Undefined variable '" + ident->name + "'");
+			scopes.pop_back();
+			popScope();
+			lastValue = nullptr;
+			return;
+		}
+		elemAddr = existing->addr;
+		elemSlotTy = existing->type;
+	} else if (node.itemDecl) {
+		error("Invalid target in for loop");
+		scopes.pop_back();
+		popScope();
+		lastValue = nullptr;
+		return;
+	}
+
+	auto* condBB  = llvm::BasicBlock::Create(context, "forcond",  currentFn);
+	auto* loopBB  = llvm::BasicBlock::Create(context, "forloop",  currentFn);
+	auto* stepBB  = llvm::BasicBlock::Create(context, "forstep",  currentFn);
+	auto* afterBB = llvm::BasicBlock::Create(context, "forafter", currentFn);
+
+	builder.CreateBr(condBB);
+
+	builder.SetInsertPoint(condBB);
+	llvm::Value* curIdx = builder.CreateLoad(idxTy, idxAlloca, "idx");
+	llvm::Value* cmp = idxTy->isFloatingPointTy()
+		? builder.CreateFCmpOLT(curIdx, endVal, "forcmp")
+		: builder.CreateICmpSLT(curIdx, endVal, "forcmp");
+	builder.CreateCondBr(cmp, loopBB, afterBB);
+
+	builder.SetInsertPoint(loopBB);
+	if (elemAddr) {
+		llvm::Value* toStore = nullptr;
+		if (dataBase) {
+			llvm::Value* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 0);
+			llvm::Value* elemPtr = builder.CreateInBoundsGEP(
+				iterTy, dataBase, { zero, curIdx }, "forelemptr");
+			toStore = builder.CreateLoad(elemTy, elemPtr, "forelem");
+		} else {
+			toStore = curIdx;
+		}
+
+		if (elemSlotTy && toStore->getType() != elemSlotTy) {
+			toStore = coerce(toStore, elemSlotTy);
+		}
+		builder.CreateStore(toStore, elemAddr);
+	}
+
+	loopStack.push_back({ afterBB, stepBB });
+	emit(node.body.get());
+	loopStack.pop_back();
+	branchIfOpen(stepBB);
+
+	builder.SetInsertPoint(stepBB);
+	llvm::Value* idxForStep = builder.CreateLoad(idxTy, idxAlloca, "idxstep");
+	llvm::Value* one = llvm::ConstantInt::get(idxTy, 1);
+	llvm::Value* nextIdx = builder.CreateAdd(idxForStep, one, "idxnext");
+	builder.CreateStore(nextIdx, idxAlloca);
+	builder.CreateBr(condBB);
+
+	builder.SetInsertPoint(afterBB);
+	scopes.pop_back();
+	popScope();
+	lastValue = nullptr;
+}
+
 void CodeGenerator::visit(LoopExpr& node) {
 	if (!node.loopBranch) return;
 

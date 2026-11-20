@@ -121,6 +121,7 @@ public:
 	void visit(Block& node) override;
 	void visit(IfExpr& node) override;
 	void visit(WhileExpr& node) override;
+	void visit(ForExpr& node) override;
 	void visit(LoopExpr& node) override;
 	void visit(BreakExpr& node) override;
 	void visit(ContinueExpr& node) override;

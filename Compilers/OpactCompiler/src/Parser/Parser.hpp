@@ -92,6 +92,8 @@ class Parser {
 		ExprPtr parseIf();
 		/** @brief parses while (expression) and then block*/
 		ExprPtr parseWhile();
+		/** @brief parses for (expression) and then block*/
+		ExprPtr parseFor();
 		/** @brief parses loop (initially a while true might become a loop until) and then block*/
 		ExprPtr parseLoop();
 		
