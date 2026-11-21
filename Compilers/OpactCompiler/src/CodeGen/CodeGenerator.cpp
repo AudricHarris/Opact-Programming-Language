@@ -421,8 +421,35 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 			return fp ? builder.CreateFRem(l, r, "modtmp")
 				: (isUnsigned ? builder.CreateURem(l, r, "uremtmp") : builder.CreateSRem(l, r, "sremtmp"));
 
-		case BinaryOp::Eq: return fp ? builder.CreateFCmpOEQ(l, r, "cmptmp") : builder.CreateICmpEQ(l, r, "cmptmp");
-		case BinaryOp::Ne: return fp ? builder.CreateFCmpUNE(l, r, "cmptmp") : builder.CreateICmpNE(l, r, "cmptmp");
+		case BinaryOp::Eq:
+			if (lt->isPointerTy() && rt->isPointerTy()) {
+				auto charPtrTy = builder.getPtrTy();
+				auto i32Ty = builder.getInt32Ty();
+				auto strcmpFn = module->getOrInsertFunction(
+						"strcmp", llvm::FunctionType::get(i32Ty, { charPtrTy, charPtrTy }, false));
+				llvm::Value* cmpRes = builder.CreateCall(
+						strcmpFn,
+						{ builder.CreatePointerCast(l, charPtrTy, "strcmp_s1"),
+						  builder.CreatePointerCast(r, charPtrTy, "strcmp_s2") },
+						"strcmp_res");
+				return builder.CreateICmpEQ(cmpRes, llvm::ConstantInt::get(i32Ty, 0), "streqtmp");
+			}
+			return fp ? builder.CreateFCmpOEQ(l, r, "cmptmp") : builder.CreateICmpEQ(l, r, "cmptmp");
+
+		case BinaryOp::Ne:
+			if (lt->isPointerTy() && rt->isPointerTy()) {
+				auto charPtrTy = builder.getPtrTy();
+				auto i32Ty = builder.getInt32Ty();
+				auto strcmpFn = module->getOrInsertFunction(
+						"strcmp", llvm::FunctionType::get(i32Ty, { charPtrTy, charPtrTy }, false));
+				llvm::Value* cmpRes = builder.CreateCall(
+						strcmpFn,
+						{ builder.CreatePointerCast(l, charPtrTy, "strcmp_s1"),
+						  builder.CreatePointerCast(r, charPtrTy, "strcmp_s2") },
+						"strcmp_res");
+				return builder.CreateICmpNE(cmpRes, llvm::ConstantInt::get(i32Ty, 0), "strnetmp");
+			}
+			return fp ? builder.CreateFCmpUNE(l, r, "cmptmp") : builder.CreateICmpNE(l, r, "cmptmp");
 		case BinaryOp::Lt: return fp ? builder.CreateFCmpOLT(l, r, "cmptmp") : (isUnsigned ? builder.CreateICmpULT(l, r, "cmptmp") : builder.CreateICmpSLT(l, r, "cmptmp"));
 		case BinaryOp::Gt: return fp ? builder.CreateFCmpOGT(l, r, "cmptmp") : (isUnsigned ? builder.CreateICmpUGT(l, r, "cmptmp") : builder.CreateICmpSGT(l, r, "cmptmp"));
 		case BinaryOp::Le: return fp ? builder.CreateFCmpOLE(l, r, "cmptmp") : (isUnsigned ? builder.CreateICmpULE(l, r, "cmptmp") : builder.CreateICmpSLE(l, r, "cmptmp"));
@@ -448,7 +475,7 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 		return var->addr;
 	}
 
-	// 2. Array Index (e.g., `lstHuman[3]` or `plateau[row][col]` or `plateau[0]`)
+	// 2. Array Index (e.g., `lstHuman[3]` or `plateau[row][col]` or `plateau[0]` or `dir[0]`)
 	if (auto* aie = dynamic_cast<ArrayIndexExpr*>(e)) {
 		if (!aie->array || aie->indices.empty()) return nullptr;
 		llvm::Value* currentPtr = nullptr;
@@ -466,16 +493,13 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 				currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ref");
 				currentTy = var->pointee;
 			} else if (currentTy->isPointerTy()) {
-				llvm::Type* targetTy = var->structType ? static_cast<llvm::Type*>(var->structType) : nullptr;
-				if (!targetTy) {
-					for (const auto& kv : g_dynArrays) {
-						targetTy = const_cast<llvm::Type*>(kv.first);
-						break;
-					}
-				}
-				if (targetTy) {
+				if (var->structType) {
 					currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ptr");
-					currentTy = targetTy;
+					currentTy = var->structType;
+				} else {
+					// Plain `ptr` (such as `str` from Read()) is an `i8` byte buffer, not a `%dynarray`.
+					currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ptr");
+					currentTy = builder.getInt8Ty();
 				}
 			}
 		} else if (auto* ma = dynamic_cast<MemberAccessExpr*>(aie->array.get())) {
@@ -558,6 +582,7 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 				currentTy = arrTy->getElementType();
 			} else {
 				currentPtr = builder.CreateInBoundsGEP(builder.getInt8Ty(), currentPtr, { idx }, "ptr_idx_ptr");
+				currentTy = builder.getInt8Ty();
 			}
 		}
 		return currentPtr;
@@ -1187,16 +1212,15 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 			currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ref");
 			currentTy = var->pointee;
 		} else if (currentTy->isPointerTy()) {
-			llvm::Type* targetTy = var->structType ? static_cast<llvm::Type*>(var->structType) : nullptr;
-			if (!targetTy) {
-				for (const auto& kv : g_dynArrays) {
-					targetTy = const_cast<llvm::Type*>(kv.first);
-					break;
-				}
-			}
-			if (targetTy) {
+			if (var->structType) {
 				currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ptr");
-				currentTy = targetTy;
+				currentTy = var->structType;
+			} else if (!g_dynArrays.empty() && id->name != "dir") {
+				currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ptr");
+				currentTy = const_cast<llvm::Type*>(g_dynArrays.begin()->first);
+			} else {
+				currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ptr");
+				currentTy = builder.getInt8Ty();
 			}
 		}
 	} else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.array.get())) {
@@ -1250,9 +1274,9 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 			std::vector<llvm::Value*> dims;
 			for (size_t k = 0; k < dyn->rank; ++k) {
 				dims.push_back(builder.CreateLoad(
-						i64,
-						builder.CreateStructGEP(dynStructTy, currentPtr, static_cast<unsigned>(k + 1)),
-						"dyn_sub_dim"));
+							i64,
+							builder.CreateStructGEP(dynStructTy, currentPtr, static_cast<unsigned>(k + 1)),
+							"dyn_sub_dim"));
 			}
 
 			llvm::Value* stride = dims[1];
@@ -1286,7 +1310,8 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 			currentPtr = builder.CreateInBoundsGEP(arrTy, currentPtr, { builder.getInt64(0), idx }, "array_idx");
 			currentTy = arrTy->getElementType();
 		} else if (currentPtr->getType()->isPointerTy()) {
-			currentPtr = builder.CreateInBoundsGEP(currentTy, currentPtr, { idx }, "ptr_idx");
+			currentPtr = builder.CreateInBoundsGEP(builder.getInt8Ty(), currentPtr, { idx }, "ptr_idx");
+			currentTy = builder.getInt8Ty();
 		} else {
 			error("Indexing applied to non-array type");
 			return;
@@ -1645,8 +1670,8 @@ void CodeGenerator::visit(ForExpr& node) {
 	llvm::Value* dataBase = nullptr; // Non-null when indexing into an array/buffer.
 	bool         flatData = false;   // dataBase is a plain element buffer (GEP bufElemTy, data, i)
 	llvm::Type*  bufElemTy = nullptr; // element type of that buffer
-	// Row mode ('?' array of rank > 1 looped with a Tile[?]-style variable):
-	// each step yields a rank-1 descriptor { &row, remaining dims... }.
+									  // Row mode ('?' array of rank > 1 looped with a Tile[?]-style variable):
+									  // each step yields a rank-1 descriptor { &row, remaining dims... }.
 	llvm::StructType*          sliceTy = nullptr;
 	llvm::Value*               rowStride = nullptr;
 	std::vector<llvm::Value*>  rowDims;
@@ -1706,7 +1731,7 @@ void CodeGenerator::visit(ForExpr& node) {
 		startVal = llvm::ConstantInt::get(idxTy, 0);
 		endVal   = llvm::ConstantInt::get(idxTy, count);
 	} else if (auto* structTy = llvm::dyn_cast<llvm::StructType>(iterTy);
-	           structTy && structTy->getName().starts_with("Range")) {
+			structTy && structTy->getName().starts_with("Range")) {
 		llvm::Value* rangeAlloca = iterVal->getType()->isPointerTy() ? iterVal : nullptr;
 		if (!rangeAlloca) {
 			rangeAlloca = createEntryAlloca(currentFn, structTy, "forrange");
@@ -1740,8 +1765,8 @@ void CodeGenerator::visit(ForExpr& node) {
 		info.addr = allocaInst;
 		info.type = elemSlotTy;
 		info.isUnsigned = decl->type.isReference ? false : (decl->type.type == DataType::U8 ||
-			decl->type.type == DataType::U16 || decl->type.type == DataType::U32 ||
-			decl->type.type == DataType::U64);
+				decl->type.type == DataType::U16 || decl->type.type == DataType::U32 ||
+				decl->type.type == DataType::U64);
 		if (auto* st = llvm::dyn_cast<llvm::StructType>(elemSlotTy)) {
 			info.structType = st;
 		}
