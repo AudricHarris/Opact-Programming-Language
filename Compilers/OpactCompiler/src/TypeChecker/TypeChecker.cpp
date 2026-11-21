@@ -831,14 +831,6 @@ void TypeChecker::visit(ArrayIndexExpr& node) {
 	}
 
 	for (size_t i = 0; i < node.indices.size(); ++i) {
-		if (currentExprType->getKind() != TypeKind::Array) {
-			reportError(node.line, node.col, "Indexing applied to non-array type: " + currentExprType->toString());
-			currentType = prim(BuiltinType::Void);
-			return;
-		}
-
-		auto* arr = static_cast<const ArrayType*>(currentExprType.get());
-
 		if (node.indices[i]) {
 			auto indexType = valueTypeOf(*node.indices[i]);
 			if (!isPrim(indexType, BuiltinType::Int)) {
@@ -846,7 +838,16 @@ void TypeChecker::visit(ArrayIndexExpr& node) {
 			}
 		}
 
-		currentExprType = arr->getElementType();
+		if (currentExprType->getKind() == TypeKind::Array) {
+			auto* arr = static_cast<const ArrayType*>(currentExprType.get());
+			currentExprType = arr->getElementType();
+		} else if (isPrim(currentExprType, BuiltinType::Str)) {
+			currentExprType = prim(BuiltinType::Char);
+		} else {
+			reportError(node.line, node.col, "Indexing applied to non-array type: " + currentExprType->toString());
+			currentType = prim(BuiltinType::Void);
+			return;
+		}
 	}
 
 	// Elements of an unsigned array are unsigned.
