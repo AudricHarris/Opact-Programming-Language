@@ -246,7 +246,7 @@ class CompilerPipeline {
 			}
 
 			// 3) Clean up the intermediate .ll files.
-			//for (auto& [path, b] : built) std::remove(b.llPath.c_str());
+			for (auto& [path, b] : built) std::remove(b.llPath.c_str());
 		}
 };
 
