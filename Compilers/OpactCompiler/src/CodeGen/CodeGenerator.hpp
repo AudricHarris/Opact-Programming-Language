@@ -152,7 +152,9 @@ private:
 		llvm::StructType* structType = nullptr;
 		llvm::Type* pointee = nullptr; // set for references to non-struct types (what the pointer points at)
 		bool isUnsigned = false;
+		llvm::Value* ownedSlot = nullptr; // heap slot currently owned by this variable
 	};
+
 	struct LoopTargets { llvm::BasicBlock* breakBB; llvm::BasicBlock* continueBB; };
 	struct StructInfo {
 		llvm::StructType* type;
@@ -174,6 +176,7 @@ private:
 	void registerCleanup(llvm::Value* slot);
 	void emitCleanups(const std::vector<llvm::Value*>& slots, llvm::Value* keep);
 	llvm::AllocaInst* createHeapSlot(const std::string& name);
+	void transferHeapSlot(VarInfo* var, llvm::Value* slot);
 
 	//----------------------------------------------------------------------//
 	//  Builtins internals                                     [Builtins.cpp] //
@@ -238,6 +241,7 @@ private:
 	std::unique_ptr<llvm::Module> module;
 
 	llvm::Value* lastValue = nullptr;
+	llvm::Value* lastHeapSlot = nullptr;
 	llvm::Function* currentFn = nullptr;
 	int errorCount = 0;
 

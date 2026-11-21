@@ -137,11 +137,15 @@ bool CodeGenerator::appendFormatArg(llvm::Value*& v, std::string& fmt) {
 
 llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 	using namespace codegen_detail;
+	const char* fnLabel = newline ? "Println" : "Printf";
 
-	if (call.arguments.empty()) { error("Printf needs a format string"); return nullptr; }
+	if (call.arguments.empty()) {
+		error(std::string(fnLabel) + " needs a format string");
+		return nullptr;
+	}
 	auto* lit = dynamic_cast<LiteralExpr*>(call.arguments[0].get());
 	if (!lit || lit->kind != LiteralKind::Str) {
-		error("Printf: first argument must be a string literal");
+		error(std::string(fnLabel) + ": first argument must be a string literal");
 		return nullptr;
 	}
 
@@ -164,20 +168,26 @@ llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 				if (tmpl[j] == '{') ++depth;
 				else if (tmpl[j] == '}' && --depth == 0) break;
 			}
-			if (j >= tmpl.size()) { error("Printf: unterminated '{' in format string"); return nullptr; }
+			if (j >= tmpl.size()) {
+				error(std::string(fnLabel) + ": unterminated '{' in format string");
+				return nullptr;
+			}
 
 			std::string inner = trim(tmpl.substr(i + 1, j - i - 1));
 			llvm::Value* v = nullptr;
 
 			if (inner.empty()) {                       // "{}" -> next extra argument
 				if (nextPositional >= call.arguments.size()) {
-					error("Printf: '{}' has no matching argument");
+					error(std::string(fnLabel) + ": '{}' has no matching argument");
 					return nullptr;
 				}
 				v = emit(call.arguments[nextPositional++].get());
 			} else {                                   // "{any expression}"
 				ExprPtr e = parseInlineExpression(inner);
-				if (!e) { error("Printf: invalid expression '" + inner + "'"); return nullptr; }
+				if (!e) {
+					error(std::string(fnLabel) + ": invalid expression '" + inner + "'");
+					return nullptr;
+				}
 				v = emit(e.get());
 			}
 
@@ -192,7 +202,8 @@ llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 			if (!varName.empty()) {
 				VarInfo* sv = lookupVar(varName);
 				if (sv && sv->structType) {
-					error("Printf: '" + varName + "' is a structure; print its fields instead (e.g. {" +
+					error(std::string(fnLabel) + ": '" + varName +
+							"' is a structure; print its fields instead (e.g. {" +
 							varName + ".field})");
 					return nullptr;
 				}
@@ -220,7 +231,7 @@ llvm::Value* CodeGenerator::emitFormatted(CallExpr& call, bool newline) {
 	}
 
 	if (nextPositional < call.arguments.size())
-		std::cerr << "Codegen Warning: Printf has unused extra arguments\n";
+		std::cerr << "Codegen Warning: " << fnLabel << " has unused extra arguments\n";
 
 	llvm::Type* charPtrTy = builder.getPtrTy();
 	auto printfFn = module->getOrInsertFunction("printf",
@@ -259,31 +270,64 @@ llvm::Value* CodeGenerator::emitRange(CallExpr& call) {
 	}
 
 	long long v[3] = { 0, 0, 1 };
+	bool allConst = true;
 	for (size_t i = 0; i < n; ++i) {
 		if (!constI32(call.arguments[i].get(), v[i])) {
-			error("Range arguments must be integer constants (array sizes are fixed at compile time)");
-			return nullptr;
+			allConst = false;
+			break;
 		}
 	}
 
-	long long start = 0, end = 0, step = 1;
-	if (n == 1)      { end = v[0]; }
-	else if (n == 2) { start = v[0]; end = v[1]; }
-	else             { start = v[0]; end = v[1]; step = v[2]; }
+	if (allConst) {
+		long long start = 0, end = 0, step = 1;
+		if (n == 1)      { end = v[0]; }
+		else if (n == 2) { start = v[0]; end = v[1]; }
+		else             { start = v[0]; end = v[1]; step = v[2]; }
 
-	long long count = 0;
-	std::string err;
-	if (!rangeLength(start, end, step, count, err)) { error(err); return nullptr; }
+		long long count = 0;
+		std::string err;
+		if (!rangeLength(start, end, step, count, err)) { error(err); return nullptr; }
 
-	std::vector<int32_t> values;
-	values.reserve(static_cast<size_t>(count));
-	for (long long i = 0; i < count; ++i)
-		values.push_back(static_cast<int32_t>(start + i * step));
+		std::vector<int32_t> values;
+		values.reserve(static_cast<size_t>(count));
+		for (long long i = 0; i < count; ++i)
+			values.push_back(static_cast<int32_t>(start + i * step));
 
-	llvm::Constant* data = llvm::ConstantDataArray::get(context, values); // [count x i32]
-	llvm::AllocaInst* slot = createEntryAlloca(currentFn, data->getType(), "range");
-	builder.CreateStore(data, slot);
-	return slot; // address of the array, like an array literal
+		llvm::Constant* data = llvm::ConstantDataArray::get(context, values); // [count x i32]
+		llvm::AllocaInst* slot = createEntryAlloca(currentFn, data->getType(), "range");
+		builder.CreateStore(data, slot);
+		return slot; // address of the array, like an array literal
+	}
+
+	// Runtime bounds: emit a "Range" struct { i32 start, i32 end } for ForExpr.
+	llvm::Type* i32 = builder.getInt32Ty();
+	llvm::Value* startVal = llvm::ConstantInt::get(i32, 0);
+	llvm::Value* endVal = nullptr;
+
+	auto evalBound = [&](Expression* expr) -> llvm::Value* {
+		llvm::Value* raw = emit(expr);
+		if (!raw) return nullptr;
+		return coerce(raw, i32);
+	};
+
+	if (n == 1) {
+		endVal = evalBound(call.arguments[0].get());
+		if (!endVal) return nullptr;
+	} else {
+		startVal = evalBound(call.arguments[0].get());
+		endVal = evalBound(call.arguments[1].get());
+		if (!startVal || !endVal) return nullptr;
+	}
+
+	llvm::StructType* rangeTy = llvm::StructType::getTypeByName(context, "Range");
+	if (!rangeTy) {
+		rangeTy = llvm::StructType::create(context, { i32, i32 }, "Range");
+	}
+
+	llvm::AllocaInst* slot = createEntryAlloca(currentFn, rangeTy, "range_dyn");
+	builder.CreateStore(startVal, builder.CreateStructGEP(rangeTy, slot, 0, "range_start_ptr"));
+	builder.CreateStore(endVal, builder.CreateStructGEP(rangeTy, slot, 1, "range_end_ptr"));
+	return slot;
 }
 
 llvm::Value* CodeGenerator::emitRandom(CallExpr& call) {

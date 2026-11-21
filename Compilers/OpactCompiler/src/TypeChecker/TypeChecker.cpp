@@ -698,7 +698,6 @@ void TypeChecker::visit(CallExpr& node) {
 					return;
 				}
 
-				long long v[3] = { 0, 0, 1 };
 				bool ok = true;
 				for (size_t i = 0; i < n; ++i) {
 					if (!node.arguments[i]) { ok = false; continue; }
@@ -706,29 +705,12 @@ void TypeChecker::visit(CallExpr& node) {
 					if (!isPrim(at, BuiltinType::Int)) {
 						reportError(node.line, node.col, "Range arguments must be integers, got " + at->toString());
 						ok = false;
-					} else if (!constIntValue(node.arguments[i].get(), v[i])) {
-						reportError(node.line, node.col,
-								"Range arguments must be integer constants",
-								"The array length has to be known at compile time.");
-						ok = false;
 					}
 				}
 				if (!ok) return;
 
-				long long start = 0, end = 0, step = 1;
-				if (n == 1)      { end = v[0]; }
-				else if (n == 2) { start = v[0]; end = v[1]; }
-				else             { start = v[0]; end = v[1]; step = v[2]; }
-
-				long long count = 0;
-				std::string err;
-				if (!rangeLength(start, end, step, count, err)) {
-					reportError(node.line, node.col, err);
-					return;
-				}
-
 				currentType = std::make_shared<ArrayType>(prim(BuiltinType::Int),
-						static_cast<size_t>(count));
+						static_cast<size_t>(-1));
 				return;
 			}
 		}

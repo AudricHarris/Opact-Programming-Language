@@ -219,6 +219,30 @@ llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 			return nullptr;
 		}
 
+		// Single char (i8) -> 2-byte heap string so `char as str` produces a C string.
+		if (from->isIntegerTy(8)) {
+			auto mallocFn = module->getOrInsertFunction(
+				"malloc",
+				llvm::FunctionType::get(builder.getPtrTy(), { builder.getInt64Ty() }, false)
+			);
+			llvm::Value* buf = builder.CreateCall(
+				mallocFn,
+				{ llvm::ConstantInt::get(builder.getInt64Ty(), 2) },
+				"char_str_buf"
+			);
+			llvm::AllocaInst* slot = createHeapSlot("heap_char_str");
+			builder.CreateStore(buf, slot);
+			registerCleanup(slot);
+			lastHeapSlot = slot;
+
+			builder.CreateStore(v, buf);
+			llvm::Value* nullTermPtr = builder.CreateInBoundsGEP(
+				builder.getInt8Ty(), buf, { builder.getInt64(1) }, "char_str_null_ptr"
+			);
+			builder.CreateStore(llvm::ConstantInt::get(builder.getInt8Ty(), 0), nullTermPtr);
+			return builder.CreatePointerCast(buf, to, "char_to_str");
+		}
+
 		// Normalize integer to i64 for "%lld"
 		llvm::Value* val64 = v;
 		if (val64->getType()->getIntegerBitWidth() < 64) {
@@ -260,7 +284,13 @@ llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 		return builder.CreatePointerCast(buf, to, "itoa_cast");
 	}
 
-	error("Cannot convert between these types");
+	std::string fromStr;
+	std::string toStr;
+	llvm::raw_string_ostream rsoFrom(fromStr);
+	llvm::raw_string_ostream rsoTo(toStr);
+	from->print(rsoFrom);
+	to->print(rsoTo);
+	error("Cannot convert between these types: from " + rsoFrom.str() + " to " + rsoTo.str());
 	return nullptr;
 }
 
@@ -311,6 +341,35 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 	llvm::Type* lt = l->getType();
 	llvm::Type* rt = r->getType();
 
+	auto charToStrPtr = [&](llvm::Value* chVal) -> llvm::Value* {
+		llvm::Value* ch8 = coerce(chVal, builder.getInt8Ty());
+		if (!ch8) return nullptr;
+		llvm::ArrayType* bufTy = llvm::ArrayType::get(builder.getInt8Ty(), 2);
+		llvm::AllocaInst* buf = createEntryAlloca(currentFn, bufTy, "ch_str_buf");
+		builder.CreateStore(ch8, builder.CreateInBoundsGEP(bufTy, buf, { builder.getInt64(0), builder.getInt64(0) }));
+		builder.CreateStore(llvm::ConstantInt::get(builder.getInt8Ty(), 0),
+				builder.CreateInBoundsGEP(bufTy, buf, { builder.getInt64(0), builder.getInt64(1) }));
+		return builder.CreateInBoundsGEP(bufTy, buf, { builder.getInt64(0), builder.getInt64(0) }, "ch_str");
+	};
+
+	// String + char / char + string concatenation
+	if (op == BinaryOp::Add &&
+			((lt->isPointerTy() && rt->isIntegerTy(8)) || (lt->isIntegerTy(8) && rt->isPointerTy()))) {
+		if (!currentFn) {
+			error("String concatenation outside of a function");
+			return nullptr;
+		}
+		if (lt->isIntegerTy(8)) {
+			l = charToStrPtr(l);
+			if (!l) return nullptr;
+		} else {
+			r = charToStrPtr(r);
+			if (!r) return nullptr;
+		}
+		lt = l->getType();
+		rt = r->getType();
+	}
+
 	// String/pointer concatenation BEFORE unify so different pointer types don't trigger errors
 	if (op == BinaryOp::Add && !lt->isFloatingPointTy() && !lt->isIntegerTy() &&
 			!rt->isFloatingPointTy() && !rt->isIntegerTy()) {
@@ -337,6 +396,7 @@ llvm::Value* CodeGenerator::emitBinary(BinaryOp op, llvm::Value* l, llvm::Value*
 		llvm::AllocaInst* slot = createHeapSlot("heap_str");
 		builder.CreateStore(dest, slot);
 		registerCleanup(slot);
+		lastHeapSlot = slot;
 
 		builder.CreateCall(memcpyFn, { dest, str1, len1 });
 		llvm::Value* destOffset = builder.CreateInBoundsGEP(builder.getInt8Ty(), dest, { len1 }, "dest_offset");
@@ -388,7 +448,7 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 		return var->addr;
 	}
 
-	// 2. Array Index (e.g., `lstHuman[3]` or `game.map[row][col]`)
+	// 2. Array Index (e.g., `lstHuman[3]` or `plateau[row][col]` or `plateau[0]`)
 	if (auto* aie = dynamic_cast<ArrayIndexExpr*>(e)) {
 		if (!aie->array || aie->indices.empty()) return nullptr;
 		llvm::Value* currentPtr = nullptr;
@@ -402,6 +462,22 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 			}
 			currentPtr = var->addr;
 			currentTy = var->type;
+			if (var->pointee) {
+				currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ref");
+				currentTy = var->pointee;
+			} else if (currentTy->isPointerTy()) {
+				llvm::Type* targetTy = var->structType ? static_cast<llvm::Type*>(var->structType) : nullptr;
+				if (!targetTy) {
+					for (const auto& kv : g_dynArrays) {
+						targetTy = const_cast<llvm::Type*>(kv.first);
+						break;
+					}
+				}
+				if (targetTy) {
+					currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ptr");
+					currentTy = targetTy;
+				}
+			}
 		} else if (auto* ma = dynamic_cast<MemberAccessExpr*>(aie->array.get())) {
 			if (!emitFieldAddr(*ma, currentPtr, currentTy)) return nullptr;
 		} else {
@@ -413,21 +489,62 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 
 		for (size_t i = 0; i < aie->indices.size(); ++i) {
 			if (const DynArrayInfo* dyn = dynInfo(currentTy)) {
-				if (i + dyn->rank > aie->indices.size()) {
-					error("An array with unknown ('?') dimensions needs all " +
-							std::to_string(dyn->rank) + " indices at once");
-					return nullptr;
+				size_t avail = aie->indices.size() - i;
+				auto* dynStructTy = llvm::cast<llvm::StructType>(currentTy);
+				llvm::Type* i64 = builder.getInt64Ty();
+
+				if (avail >= dyn->rank) {
+					std::vector<llvm::Value*> idxs;
+					for (size_t k = 0; k < dyn->rank; ++k) {
+						llvm::Value* v = emit(aie->indices[i + k].get());
+						if (v) v = coerce(v, i64);
+						if (!v) return nullptr;
+						idxs.push_back(v);
+					}
+					currentPtr = dynElemPtr(builder, *dyn, dynStructTy, currentPtr, idxs);
+					currentTy = dyn->elemTy;
+					i += dyn->rank - 1;
+					continue;
 				}
-				std::vector<llvm::Value*> idxs;
+
+				// Partial index (`avail < dyn->rank`): build a sub-descriptor of rank `dyn->rank - avail`.
+				llvm::Value* idxVal = emit(aie->indices[i].get());
+				if (!idxVal) return nullptr;
+				idxVal = coerce(idxVal, i64);
+				if (!idxVal) return nullptr;
+
+				llvm::Value* dataPtr = builder.CreateLoad(
+						builder.getPtrTy(),
+						builder.CreateStructGEP(dynStructTy, currentPtr, 0),
+						"dyn_sub_data");
+
+				std::vector<llvm::Value*> dims;
 				for (size_t k = 0; k < dyn->rank; ++k) {
-					llvm::Value* v = emit(aie->indices[i + k].get());
-					if (v) v = coerce(v, builder.getInt64Ty());
-					if (!v) return nullptr;
-					idxs.push_back(v);
+					dims.push_back(builder.CreateLoad(
+							i64,
+							builder.CreateStructGEP(dynStructTy, currentPtr, static_cast<unsigned>(k + 1)),
+							"dyn_sub_dim"));
 				}
-				currentPtr = dynElemPtr(builder, *dyn, llvm::cast<llvm::StructType>(currentTy), currentPtr, idxs);
-				currentTy = dyn->elemTy;
-				i += dyn->rank - 1;
+
+				llvm::Value* stride = dims[1];
+				for (size_t k = 2; k < dyn->rank; ++k) {
+					stride = builder.CreateMul(stride, dims[k], "dyn_sub_stride");
+				}
+				llvm::Value* offset = builder.CreateMul(idxVal, stride, "dyn_sub_off");
+				llvm::Value* subData = builder.CreateInBoundsGEP(dyn->elemTy, dataPtr, { offset }, "dyn_sub_ptr");
+
+				size_t remRank = dyn->rank - 1;
+				llvm::StructType* subTy = getDynArrayType(context, dyn->elemTy, remRank);
+				llvm::Value* desc = llvm::PoisonValue::get(subTy);
+				desc = builder.CreateInsertValue(desc, subData, 0);
+				for (size_t k = 1; k < dyn->rank; ++k) {
+					desc = builder.CreateInsertValue(desc, dims[k], static_cast<unsigned>(k));
+				}
+
+				llvm::AllocaInst* subSlot = createEntryAlloca(currentFn, subTy, "dyn_sub_tmp");
+				builder.CreateStore(desc, subSlot);
+				currentPtr = subSlot;
+				currentTy = subTy;
 				continue;
 			}
 
@@ -443,7 +560,7 @@ llvm::Value* CodeGenerator::emitLValue(Expression* e) {
 				currentPtr = builder.CreateInBoundsGEP(builder.getInt8Ty(), currentPtr, { idx }, "ptr_idx_ptr");
 			}
 		}
-		return currentPtr; // Returns the pointer to the element without loading it
+		return currentPtr;
 	}
 
 	// 3. Member Access (e.g., `human.age` or `game.map[row].adjacentBombs`)
@@ -810,6 +927,52 @@ void CodeGenerator::registerCleanup(llvm::Value* slot) {
 	}
 }
 
+void CodeGenerator::transferHeapSlot(VarInfo* var, llvm::Value* slot) {
+	if (!slot) return;
+
+	for (auto& cleanupList : scopeCleanups) {
+		cleanupList.erase(
+			std::remove(cleanupList.begin(), cleanupList.end(), slot),
+			cleanupList.end()
+		);
+	}
+
+	if (!var) {
+		// Not assigned to a tracked local variable: keep it in current scope if any.
+		if (!scopeCleanups.empty()) {
+			scopeCleanups.back().push_back(slot);
+		}
+		return;
+	}
+
+	// If `var` previously owned a different heap allocation, free it before replacing.
+	if (var->ownedSlot && var->ownedSlot != slot) {
+		llvm::Value* prevPtr = builder.CreateLoad(builder.getPtrTy(), var->ownedSlot, "prev_heap_ptr");
+		llvm::BasicBlock* freeBB = llvm::BasicBlock::Create(context, "free_prev_heap", currentFn);
+		llvm::BasicBlock* contBB = llvm::BasicBlock::Create(context, "cont_prev_heap", currentFn);
+		llvm::Value* nonNull = builder.CreateICmpNE(prevPtr, llvm::ConstantPointerNull::get(builder.getPtrTy()));
+		builder.CreateCondBr(nonNull, freeBB, contBB);
+
+		builder.SetInsertPoint(freeBB);
+		auto freeFn = module->getOrInsertFunction(
+			"free",
+			llvm::FunctionType::get(builder.getVoidTy(), { builder.getPtrTy() }, false)
+		);
+		builder.CreateCall(freeFn, { prevPtr });
+		builder.CreateStore(llvm::ConstantPointerNull::get(builder.getPtrTy()), var->ownedSlot);
+		builder.CreateBr(contBB);
+
+		builder.SetInsertPoint(contBB);
+	}
+
+	var->ownedSlot = slot;
+
+	if (!scopeCleanups.empty()) {
+		auto& targetScope = (scopeCleanups.size() > 1) ? scopeCleanups[1] : scopeCleanups.back();
+		targetScope.push_back(slot);
+	}
+}
+
 llvm::Value* CodeGenerator::emitUnsignedValue(Expression* e, llvm::Type* ty, const std::string& what) {
 	if (!e || !ty) return nullptr;
 	if (!ty->isIntegerTy()) return emit(e);
@@ -1012,15 +1175,30 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 	llvm::Value* currentPtr = nullptr;
 	llvm::Type* currentTy = nullptr;
 
-	// Get the base pointer and type of the array
 	if (auto* id = dynamic_cast<IdentifierExpr*>(node.array.get())) {
 		VarInfo* var = lookupVar(id->name);
 		if (!var) {
 			error("Undefined variable '" + id->name + "'");
 			return;
 		}
-		currentPtr = var->addr; // This is the alloca pointer ([N x T]*)
-		currentTy = var->type;  // This is the array type ([N x T])
+		currentPtr = var->addr;
+		currentTy = var->type;
+		if (var->pointee) {
+			currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ref");
+			currentTy = var->pointee;
+		} else if (currentTy->isPointerTy()) {
+			llvm::Type* targetTy = var->structType ? static_cast<llvm::Type*>(var->structType) : nullptr;
+			if (!targetTy) {
+				for (const auto& kv : g_dynArrays) {
+					targetTy = const_cast<llvm::Type*>(kv.first);
+					break;
+				}
+			}
+			if (targetTy) {
+				currentPtr = builder.CreateLoad(builder.getPtrTy(), currentPtr, id->name + "_ptr");
+				currentTy = targetTy;
+			}
+		}
 	} else if (auto* ma = dynamic_cast<MemberAccessExpr*>(node.array.get())) {
 		llvm::Value* fieldAddr = nullptr;
 		llvm::Type* fieldTy = nullptr;
@@ -1039,24 +1217,63 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 		return;
 	}
 
-	// Iterate through each index dimension
 	for (size_t i = 0; i < node.indices.size(); ++i) {
 		if (const DynArrayInfo* dyn = dynInfo(currentTy)) {
-			if (i + dyn->rank > node.indices.size()) {
-				error("An array with unknown ('?') dimensions needs all " +
-						std::to_string(dyn->rank) + " indices at once");
-				return;
+			size_t avail = node.indices.size() - i;
+			auto* dynStructTy = llvm::cast<llvm::StructType>(currentTy);
+			llvm::Type* i64 = builder.getInt64Ty();
+
+			if (avail >= dyn->rank) {
+				std::vector<llvm::Value*> idxs;
+				for (size_t k = 0; k < dyn->rank; ++k) {
+					llvm::Value* v = emit(node.indices[i + k].get());
+					if (v) v = coerce(v, i64);
+					if (!v) return;
+					idxs.push_back(v);
+				}
+				currentPtr = dynElemPtr(builder, *dyn, dynStructTy, currentPtr, idxs);
+				currentTy = dyn->elemTy;
+				i += dyn->rank - 1;
+				continue;
 			}
-			std::vector<llvm::Value*> idxs;
+
+			llvm::Value* idxVal = emit(node.indices[i].get());
+			if (!idxVal) return;
+			idxVal = coerce(idxVal, i64);
+			if (!idxVal) return;
+
+			llvm::Value* dataPtr = builder.CreateLoad(
+					builder.getPtrTy(),
+					builder.CreateStructGEP(dynStructTy, currentPtr, 0),
+					"dyn_sub_data");
+
+			std::vector<llvm::Value*> dims;
 			for (size_t k = 0; k < dyn->rank; ++k) {
-				llvm::Value* v = emit(node.indices[i + k].get());
-				if (v) v = coerce(v, builder.getInt64Ty());
-				if (!v) return;
-				idxs.push_back(v);
+				dims.push_back(builder.CreateLoad(
+						i64,
+						builder.CreateStructGEP(dynStructTy, currentPtr, static_cast<unsigned>(k + 1)),
+						"dyn_sub_dim"));
 			}
-			currentPtr = dynElemPtr(builder, *dyn, llvm::cast<llvm::StructType>(currentTy), currentPtr, idxs);
-			currentTy = dyn->elemTy;
-			i += dyn->rank - 1;
+
+			llvm::Value* stride = dims[1];
+			for (size_t k = 2; k < dyn->rank; ++k) {
+				stride = builder.CreateMul(stride, dims[k], "dyn_sub_stride");
+			}
+			llvm::Value* offset = builder.CreateMul(idxVal, stride, "dyn_sub_off");
+			llvm::Value* subData = builder.CreateInBoundsGEP(dyn->elemTy, dataPtr, { offset }, "dyn_sub_ptr");
+
+			size_t remRank = dyn->rank - 1;
+			llvm::StructType* subTy = getDynArrayType(context, dyn->elemTy, remRank);
+			llvm::Value* desc = llvm::PoisonValue::get(subTy);
+			desc = builder.CreateInsertValue(desc, subData, 0);
+			for (size_t k = 1; k < dyn->rank; ++k) {
+				desc = builder.CreateInsertValue(desc, dims[k], static_cast<unsigned>(k));
+			}
+
+			llvm::AllocaInst* subSlot = createEntryAlloca(currentFn, subTy, "dyn_sub_tmp");
+			builder.CreateStore(desc, subSlot);
+			currentPtr = subSlot;
+			currentTy = subTy;
 			continue;
 		}
 
@@ -1066,7 +1283,6 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 
 		if (currentTy->isArrayTy()) {
 			llvm::ArrayType* arrTy = llvm::cast<llvm::ArrayType>(currentTy);
-			// GEP for array alloca: requires {0, idx}
 			currentPtr = builder.CreateInBoundsGEP(arrTy, currentPtr, { builder.getInt64(0), idx }, "array_idx");
 			currentTy = arrTy->getElementType();
 		} else if (currentPtr->getType()->isPointerTy()) {
@@ -1077,8 +1293,7 @@ void CodeGenerator::visit(ArrayIndexExpr& node) {
 		}
 	}
 
-	// Load the final value if it's a primitive/element, or return the pointer if it's a nested array
-	if (currentTy->isArrayTy()) {
+	if (currentTy->isArrayTy() || dynInfo(currentTy)) {
 		lastValue = currentPtr;
 	} else {
 		lastValue = builder.CreateLoad(currentTy, currentPtr, "val_load");
@@ -1164,6 +1379,7 @@ void CodeGenerator::visit(AssignExpr& node) {
 	llvm::Value* targetPtr = nullptr;
 	llvm::Type* targetType = nullptr;
 	bool targetUnsigned = false;
+	VarInfo* targetVar = nullptr;
 
 	if (auto* id = dynamic_cast<IdentifierExpr*>(node.target.get())) {
 		VarInfo* var = lookupVar(id->name);
@@ -1171,6 +1387,7 @@ void CodeGenerator::visit(AssignExpr& node) {
 			error("Undefined variable '" + id->name + "'");
 			return;
 		}
+		targetVar = var;
 		targetUnsigned = var->isUnsigned;
 		if (var->pointee) {
 			// `r = value` on a reference writes to the referenced object.
@@ -1210,16 +1427,26 @@ void CodeGenerator::visit(AssignExpr& node) {
 		return;
 	}
 
+	lastHeapSlot = nullptr;
 	llvm::Value* raw = (targetUnsigned && targetType->isIntegerTy())
 		? emitUnsignedValue(node.value.get(), targetType, "variable")
 		: emit(node.value.get());
 	llvm::Value* v = coerce(raw, targetType);
 	if (!v) {
+		lastHeapSlot = nullptr;
 		lastValue = nullptr;
 		return;
 	}
 
 	builder.CreateStore(v, targetPtr);
+
+	// Transfer heap ownership right after storing into `targetPtr`
+	llvm::Value* slot = lastHeapSlot;
+	lastHeapSlot = nullptr;
+	if (slot) {
+		transferHeapSlot(targetVar, slot);
+	}
+
 	lastValue = v;
 }
 
@@ -1856,27 +2083,49 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 
 	if (node.memberName == "length") {
 		llvm::Type* arrTy = nullptr;
-		llvm::Value* arrAddr = nullptr; // address of arrTy, when known (for '?' arrays)
-		size_t dimIdx = 0;              // for '?' arrays: which dimension's length is asked
+		llvm::Value* arrAddr = nullptr;
+		size_t dimIdx = 0;
 
-		// 1. Check if the object is a direct array identifier (e.g., lstHuman.length)
+		auto resolveDynFromPtr = [&](llvm::Value* addr, llvm::Type* ty) {
+			if (ty && dynInfo(ty)) {
+				arrAddr = addr;
+				arrTy = ty;
+				return;
+			}
+			if (ty && ty->isPointerTy() && addr) {
+				for (const auto& kv : g_dynArrays) {
+					auto* candTy = const_cast<llvm::Type*>(kv.first);
+					arrAddr = builder.CreateLoad(builder.getPtrTy(), addr, "dyn_ptr_load");
+					arrTy = candTy;
+					return;
+				}
+			}
+		};
+
 		if (auto* id = dynamic_cast<IdentifierExpr*>(node.object.get())) {
 			VarInfo* var = lookupVar(id->name);
-			if (var) { arrTy = var->type; arrAddr = var->addr; }
+			if (var) {
+				arrTy = var->type;
+				arrAddr = var->addr;
+				if (var->pointee) {
+					arrAddr = builder.CreateLoad(builder.getPtrTy(), arrAddr, id->name + "_ref");
+					arrTy = var->pointee;
+				} else {
+					resolveDynFromPtr(arrAddr, arrTy);
+				}
+			}
 		}
-		// 2. Check if the object is an array index expression (e.g., lstHuman[cptX].length)
 		else if (auto* aie = dynamic_cast<ArrayIndexExpr*>(node.object.get())) {
 			if (auto* baseId = dynamic_cast<IdentifierExpr*>(aie->array.get())) {
 				VarInfo* var = lookupVar(baseId->name);
-				if (var && (var->type->isArrayTy() || dynInfo(var->type))) {
+				if (var) {
 					arrTy = var->type;
 					arrAddr = var->addr;
-					dimIdx = aie->indices.size();
-					// Peel back one array dimension for each index accessed
-					for (size_t i = 0; i < aie->indices.size(); ++i) {
-						if (arrTy->isArrayTy()) {
-							arrTy = llvm::cast<llvm::ArrayType>(arrTy)->getElementType();
-						}
+					if (var->pointee) {
+						arrAddr = builder.CreateLoad(builder.getPtrTy(), arrAddr, baseId->name + "_ref");
+						arrTy = var->pointee;
+					} else {
+						resolveDynFromPtr(arrAddr, arrTy);
 					}
 				}
 			} else if (auto* baseMa = dynamic_cast<MemberAccessExpr*>(aie->array.get())) {
@@ -1885,24 +2134,39 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 				if (emitFieldAddr(*baseMa, tmpAddr, tmpTy)) {
 					arrTy = tmpTy;
 					arrAddr = tmpAddr;
-					dimIdx = aie->indices.size();
-					for (size_t i = 0; i < aie->indices.size() && arrTy; ++i) {
-						if (arrTy->isArrayTy()) {
-							arrTy = llvm::cast<llvm::ArrayType>(arrTy)->getElementType();
+				}
+			}
+
+			if (arrTy && arrAddr) {
+				size_t remIndices = aie->indices.size();
+				for (size_t i = 0; i < aie->indices.size() && arrTy; ++i) {
+					if (const DynArrayInfo* dyn = dynInfo(arrTy)) {
+						if (remIndices < dyn->rank) {
+							dimIdx = remIndices;
+							break;
 						}
+						arrTy = dyn->elemTy;
+						remIndices -= dyn->rank;
+						i += dyn->rank - 1;
+					} else if (arrTy->isArrayTy()) {
+						arrTy = llvm::cast<llvm::ArrayType>(arrTy)->getElementType();
+						--remIndices;
+					} else {
+						break;
 					}
 				}
 			}
 		}
-		// 3. Check if the object is a struct member (e.g., game.map.length)
 		else if (auto* baseMa = dynamic_cast<MemberAccessExpr*>(node.object.get())) {
 			llvm::Value* tmpAddr = nullptr;
 			llvm::Type* tmpTy = nullptr;
-			if (emitFieldAddr(*baseMa, tmpAddr, tmpTy)) { arrTy = tmpTy; arrAddr = tmpAddr; }
+			if (emitFieldAddr(*baseMa, tmpAddr, tmpTy)) {
+				arrTy = tmpTy;
+				arrAddr = tmpAddr;
+				if (!dynInfo(arrTy)) resolveDynFromPtr(arrAddr, arrTy);
+			}
 		}
 
-		// '?' arrays: every dimension's length is stored at runtime.
-		// `a.length` -> dim0, `a[i].length` -> dim1, ...
 		if (arrTy && arrAddr) {
 			if (const DynArrayInfo* dyn = dynInfo(arrTy)) {
 				if (dimIdx < dyn->rank) {
@@ -1912,18 +2176,16 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 					lastValue = builder.CreateTrunc(dim, builder.getInt32Ty(), "len_i32");
 					return;
 				}
-				arrTy = nullptr; // indexed past every dimension: not an array any more
+				arrTy = nullptr;
 			}
 		}
 
-		// If we successfully resolved a multi-dimensional or 1D array type, return its compile-time size
 		if (arrTy && arrTy->isArrayTy()) {
 			uint64_t len = llvm::cast<llvm::ArrayType>(arrTy)->getNumElements();
 			lastValue = builder.getInt32(static_cast<uint32_t>(len));
 			return;
 		}
 
-		// 4. Fallback: Check if it's a string type (emits a runtime strlen call)
 		llvm::Value* objVal = emit(node.object.get());
 		if (objVal && objVal->getType()->isPointerTy()) {
 			auto sizeTy = builder.getInt64Ty();
@@ -1935,7 +2197,6 @@ void CodeGenerator::visit(MemberAccessExpr& node) {
 		}
 	}
 
-	// 5. Fallback to regular structure field access
 	llvm::Value* addr = nullptr;
 	llvm::Type* ty = nullptr;
 	if (!emitFieldAddr(node, addr, ty)) return;
