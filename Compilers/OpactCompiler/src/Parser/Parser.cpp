@@ -12,6 +12,10 @@
 #include <utility>
 #include <vector>
 
+// Marker stored in TypeDesc::dim for a '?' dimension (size unknown / inferred).
+// Consider moving this to Ast.hpp so the type checker / codegen can use it too.
+static constexpr int UNKNOWN_DIM = -1;
+
 //----------------------//
 //-- Token Navigation --//
 //----------------------//
@@ -299,9 +303,15 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 		// Parse optional array dimensions like [20][20]
 		while (this->match(TokenKind::LBRACKET))
 		{
-			Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size inside brackets []");
-			int dimensionSize = std::stoi(sizeTok.getWord());
-			ptype.dim.push_back(dimensionSize);
+			if (this->match(TokenKind::QUESTION))
+			{
+				ptype.dim.push_back(UNKNOWN_DIM);
+			}
+			else
+			{
+				Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size or '?' inside brackets []");
+				ptype.dim.push_back(std::stoi(sizeTok.getWord()));
+			}
 			this->expect(TokenKind::RBRACKET, "Expected closing ']' after array size");
 		}
 
@@ -421,6 +431,28 @@ ExprPtr Parser::parseFunction(std::optional<Token> visib)
 			}
 
 			Token ptypeTok = this->expect(TokenKind::IDENTIFIER, "Expected type for the param");
+
+			TypeDesc ptype;
+			ptype.type = determineType(ptypeTok);
+			ptype.customTypeName = ptypeTok.getWord();
+			ptype.isReference = isRef;
+			ptype.isMutable = isMut;
+
+			// Parse optional array dimensions like [20][20] or [?][?]
+			while (this->match(TokenKind::LBRACKET))
+			{
+				if (this->match(TokenKind::QUESTION))
+				{
+					ptype.dim.push_back(UNKNOWN_DIM);
+				}
+				else
+				{
+					Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size or '?' inside brackets []");
+					ptype.dim.push_back(std::stoi(sizeTok.getWord()));
+				}
+				this->expect(TokenKind::RBRACKET, "Expected closing ']' after array size");
+			}
+
 			Token pnameTok = this->expect(TokenKind::IDENTIFIER, "Expected name for the param");
 
 			std::optional<ExprPtr> defaultVal = std::nullopt;
@@ -428,12 +460,6 @@ ExprPtr Parser::parseFunction(std::optional<Token> visib)
 			{
 				defaultVal = this->parseExpression();
 			}
-
-			TypeDesc ptype;
-			ptype.type = determineType(ptypeTok);
-			ptype.customTypeName = ptypeTok.getWord();
-			ptype.isReference = isRef;
-			ptype.isMutable = isMut;
 
 			params.emplace_back(pnameTok.getWord(), std::move(ptype), isMut, isRef, std::move(defaultVal));
 		}
@@ -464,6 +490,21 @@ ExprPtr Parser::parseFunction(std::optional<Token> visib)
 		returnType.customTypeName = retTypeTok.getWord();
 		returnType.isReference = isRef;
 		returnType.isMutable = isMut;
+
+		// Parse optional array dimensions on return types as well
+		while (this->match(TokenKind::LBRACKET))
+		{
+			if (this->match(TokenKind::QUESTION))
+			{
+				returnType.dim.push_back(UNKNOWN_DIM);
+			}
+			else
+			{
+				Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size or '?' inside brackets []");
+				returnType.dim.push_back(std::stoi(sizeTok.getWord()));
+			}
+			this->expect(TokenKind::RBRACKET, "Expected closing ']' after array size");
+		}
 	}
 
 	ExprPtr body = this->parseBlock();
@@ -700,11 +741,15 @@ ExprPtr Parser::parseVarDecl()
 	// Parse Array Dimensions [5][10]...
 	while (this->match(TokenKind::LBRACKET))
 	{
-		Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size inside brackets []");
-
-		// Convert token value to integer (assuming getInt() or std::stoi)
-		int dimensionSize = std::stoi(sizeTok.getWord()); 
-		desc.dim.push_back(dimensionSize);
+		if (this->match(TokenKind::QUESTION))
+		{
+			desc.dim.push_back(UNKNOWN_DIM);
+		}
+		else
+		{
+			Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size or '?' inside brackets []");
+			desc.dim.push_back(std::stoi(sizeTok.getWord()));
+		}
 
 		this->expect(TokenKind::RBRACKET, "Expected closing ']' after array size");
 	}
@@ -913,6 +958,23 @@ ExprPtr Parser::parseUnary()
 
 ExprPtr Parser::parsePostfix(ExprPtr expr)
 {
+	// Lookahead: IDENTIFIER ( '[' ... ']' )+ IDENTIFIER  -> a typed array argument.
+	// This can't be a normal expression ('a[i] b' is never valid), so it's unambiguous.
+	auto isTypedArrayArg = [this]() -> bool {
+		int o = 0;
+		if (this->peekAt(o).getKind() != TokenKind::IDENTIFIER) return false;
+		o++;
+		if (this->peekAt(o).getKind() != TokenKind::LBRACKET) return false;
+		while (this->peekAt(o).getKind() == TokenKind::LBRACKET) {
+			o++;
+			while (this->peekAt(o).getKind() != TokenKind::RBRACKET &&
+					this->peekAt(o).getKind() != TokenKind::END_OF_FILE) o++;
+			if (this->peekAt(o).getKind() != TokenKind::RBRACKET) return false;
+			o++;
+		}
+		return this->peekAt(o).getKind() == TokenKind::IDENTIFIER;
+	};
+
 	while (true) {
 		// 1. Array Indexing
 		if (this->check(TokenKind::LBRACKET)) {
@@ -949,6 +1011,29 @@ ExprPtr Parser::parsePostfix(ExprPtr expr)
 					if (this->check(TokenKind::IDENTIFIER) && this->peek().getWord() == "_") {
 						Token skipTok = this->consume();
 						args.push_back(makeNode<IdentifierExpr>(skipTok, "_"));
+					} else if (isTypedArrayArg()) {
+						// Typed array argument: Tile[20][20] map  (or Tile[?][?] map)
+						Token typeTok = this->expect(TokenKind::IDENTIFIER, "Expected element type");
+						TypeDesc desc;
+						desc.type = determineType(typeTok);
+						desc.customTypeName = typeTok.getWord();
+
+						while (this->match(TokenKind::LBRACKET))
+						{
+							if (this->match(TokenKind::QUESTION))
+							{
+								desc.dim.push_back(UNKNOWN_DIM);
+							}
+							else
+							{
+								Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size or '?' inside brackets []");
+								desc.dim.push_back(std::stoi(sizeTok.getWord()));
+							}
+							this->expect(TokenKind::RBRACKET, "Expected closing ']' after array size");
+						}
+
+						Token nameTok = this->expect(TokenKind::IDENTIFIER, "Expected name after array type");
+						args.push_back(makeNode<ArrayAllocExpr>(typeTok, std::move(desc), nameTok.getWord()));
 					} else {
 						args.push_back(this->parseExpression());
 					}

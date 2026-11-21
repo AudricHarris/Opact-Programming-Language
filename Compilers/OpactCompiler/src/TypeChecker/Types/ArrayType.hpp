@@ -21,9 +21,15 @@ public:
 	}
 
 	bool equals(const Type* other) const override {
+		const size_t UNKNOWN = static_cast<size_t>(-1);
+
 		if (!other || other->getKind() != TypeKind::Array) return false;
 		auto arr = static_cast<const ArrayType*>(other);
-		if (arrayLength_ != arr->arrayLength_) return false;
+
+		// '?' (unknown length) matches any length
+		if (arrayLength_ != UNKNOWN && arr->arrayLength_ != UNKNOWN &&
+				arrayLength_ != arr->arrayLength_) return false;
+
 		if (!elementType_->equals(arr->elementType_.get())) return false;
 		return true;
 	}

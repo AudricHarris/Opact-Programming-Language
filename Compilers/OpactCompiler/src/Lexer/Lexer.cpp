@@ -411,6 +411,8 @@ static inline TokenKind singleCharKind(char c) {
 			return TokenKind::MOD;
 		case '.':
 			return TokenKind::DOT;
+		case '?':
+			return TokenKind::QUESTION;
 		default:
 			return TokenKind::UNKNOWN;
 	}
@@ -573,6 +575,14 @@ std::vector<Token> Lexer::Tokenize() {
 				++pos;
 				++col;
 			}
+			continue;
+		}
+
+		// '?'
+		if (c == '?') {
+			tokens.push_back(makeToken(TokenKind::QUESTION, "?"));
+			++pos;
+			++col;
 			continue;
 		}
 

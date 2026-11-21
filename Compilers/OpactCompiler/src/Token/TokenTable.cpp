@@ -126,6 +126,8 @@ std::string Token::toString() {
 			return "COLON  ";
 		case TokenKind::COLON_COLON:
 			return "COLON_COLON  ";
+		case TokenKind::QUESTION:
+			return "QUESTION  ";
 		case TokenKind::RETURN_TYPE:
 			return "RETURN_TYPE  ";
 		case TokenKind::NEW:

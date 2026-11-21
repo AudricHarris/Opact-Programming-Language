@@ -451,6 +451,19 @@ struct ArrayLiteralExpr : Expression {
 	}
 };
 
+struct ArrayAllocExpr : Expression {
+	TypeDesc type;
+	std::string name;
+
+	ArrayAllocExpr(TypeDesc type, std::string name)
+		: type(std::move(type)), name(std::move(name)) {}
+
+	void accept(ASTVisitor& visitor) override;
+	[[nodiscard]] ExprPtr clone() const override {
+		return std::make_unique<ArrayAllocExpr>(type, name);
+	}
+};
+
 struct TupleLiteralExpr : Expression {
 	std::vector<ExprPtr> elements;
 
@@ -607,6 +620,7 @@ struct ASTVisitor {
 	virtual void visit(MemberAccessExpr& node) = 0;
 	virtual void visit(ArrayIndexExpr& node) = 0;
 	virtual void visit(ArrayLiteralExpr& node) = 0;
+	virtual void visit(ArrayAllocExpr& node) = 0;
 	virtual void visit(TupleLiteralExpr& node) = 0;
 	virtual void visit(YieldExpr& node) = 0;
 	virtual void visit(BreakExpr& node) = 0;
@@ -641,6 +655,7 @@ inline void LoopExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void MemberAccessExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void ArrayIndexExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void ArrayLiteralExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+inline void ArrayAllocExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void TupleLiteralExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void YieldExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void BreakExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }

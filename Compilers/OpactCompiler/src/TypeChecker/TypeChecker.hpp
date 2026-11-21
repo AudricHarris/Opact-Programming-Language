@@ -52,6 +52,7 @@ public:
 	void visit(CastExpr& node) override;
 	void visit(ArrayLiteralExpr& node) override;
 	void visit(ArrayIndexExpr& node) override;
+	void visit(ArrayAllocExpr& node) override;
 
 	// Stub out remaining ASTVisitor pure virtuals...
 	void visit(GenericCallExpr& node) override {}

@@ -135,6 +135,7 @@ public:
 	void visit(BorrowExpr& node) override;
 	void visit(ArrayIndexExpr& node) override;
 	void visit(ArrayLiteralExpr& node) override;
+	void visit(ArrayAllocExpr& node) override;
 
 	// Not implemented yet
 	void visit(GenericCallExpr&) override {}

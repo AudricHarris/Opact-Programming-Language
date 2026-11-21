@@ -322,7 +322,9 @@ std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
 
 	if (!d.dim.empty()) {
 		for (auto it = d.dim.rbegin(); it != d.dim.rend(); ++it) {
-			baseType = std::make_shared<ArrayType>(baseType, *it);
+			// -1 ('?') means unknown length; store it as the sentinel SIZE_MAX.
+			const size_t len = (*it < 0) ? static_cast<size_t>(-1) : static_cast<size_t>(*it);
+			baseType = std::make_shared<ArrayType>(baseType, len);
 		}
 	}
 
@@ -353,12 +355,12 @@ TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
 			break;
 		case TypeKind::Array: {
 			auto* arrType = static_cast<const ArrayType*>(type.get());
-			d.dim.push_back(arrType->getArrayLength());
+			d.dim.push_back(arrType->getArrayLength() == static_cast<size_t>(-1) ? -1 : static_cast<int>(arrType->getArrayLength()));
 			// Unroll multi-dimensional arrays if nested
 			auto inner = arrType->getElementType();
 			while (inner->getKind() == TypeKind::Array) {
 				auto* innerArr = static_cast<const ArrayType*>(inner.get());
-				d.dim.push_back(innerArr->getArrayLength());
+				d.dim.push_back(innerArr->getArrayLength() == static_cast<size_t>(-1) ? -1 : static_cast<int>(innerArr->getArrayLength()));
 				inner = innerArr->getElementType();
 			}
 			TypeDesc innerDesc = toDesc(inner);
@@ -828,6 +830,11 @@ void TypeChecker::visit(ArrayLiteralExpr& node) {
 		}
 	}
 	currentType = std::make_shared<ArrayType>(elementType, node.elements.size());
+}
+
+void TypeChecker::visit(ArrayAllocExpr& node) {
+	// 'Tile[20][20] name' evaluates to the array type it describes.
+	currentType = fromDesc(node.type);
 }
 
 void TypeChecker::visit(ArrayIndexExpr& node) {

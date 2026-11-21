@@ -83,6 +83,7 @@ enum class TokenKind {
 	DOT,
 	COLON,
 	COLON_COLON,
+	QUESTION,
 
 	// Special
 	RETURN_TYPE,
