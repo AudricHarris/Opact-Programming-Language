@@ -485,7 +485,6 @@ connection.onCompletion((params) => {
     const text = doc.getText();
     const store = getSymbolStore(resolveWorkspace(doc.uri));
 
-    // Contextual for-range and for-each suggestions
     const collections = getCollectionCandidates(text);
     completions.push({
       label: 'for (int i : Range(...))',
@@ -509,7 +508,6 @@ connection.onCompletion((params) => {
       });
     });
 
-    // Struct initialization completions
     for (const [name, info] of store) {
       if (info.kind === CompletionItemKind.Struct) {
         const fieldsInit = (info.fields || [])
@@ -573,7 +571,6 @@ connection.onCompletionResolve((item) => {
 });
 
 function validateNonMutableReferences(text, textDocument, diagnostics) {
-  // Find functions and inspect parameters declared as `&Type name` (without `&mut`)
   const fnHeaderRx = /\bfn\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(([^)]*)\)\s*(?:->\s*[^{]+)?\{/g;
   let match;
 
@@ -581,7 +578,6 @@ function validateNonMutableReferences(text, textDocument, diagnostics) {
     const paramsStr = match[1];
     const bodyStart = match.index + match[0].length - 1;
 
-    // Locate matching closing brace for the function body
     let depth = 0;
     let bodyEnd = -1;
     for (let i = bodyStart; i < text.length; i++) {
@@ -599,7 +595,6 @@ function validateNonMutableReferences(text, textDocument, diagnostics) {
     const nonMutRefs = new Set();
     const params = paramsStr.split(',').map(p => p.trim()).filter(Boolean);
     for (const p of params) {
-      // Matches `&mut Type name` vs `&Type name`
       if (/^&\s*mut\b/.test(p)) continue;
       const refMatch = p.match(/^&[^a-zA-Z0-9_]*[a-zA-Z_][a-zA-Z0-9_<>\[\]\?]*\s+([a-zA-Z_][a-zA-Z0-9_]*)$/);
       if (refMatch) {
@@ -613,7 +608,6 @@ function validateNonMutableReferences(text, textDocument, diagnostics) {
     const bodyOffsetBase = bodyStart + 1;
 
     for (const refName of nonMutRefs) {
-      // Matches direct assignment (`ref = ...`, `ref += ...`), field/index mutation (`ref.x = ...`, `ref[0] = ...`), or `++` / `--`
       const mutationRx = new RegExp(
         `\\b${refName}\\b(?:\\s*(?:\\.\\s*[a-zA-Z_][a-zA-Z0-9_]*|\\[[^\\]]*\\]))*\\s*(?:\\+\\+|--|(?:\\+=|-=|\\*=|\\/=|%=|=(?!=)))`,
         'g'
@@ -624,7 +618,7 @@ function validateNonMutableReferences(text, textDocument, diagnostics) {
         const absStart = bodyOffsetBase + mutMatch.index;
         const absEnd = absStart + refName.length;
         diagnostics.push({
-          severity: 1, // Error
+          severity: 1,
           range: {
             start: textDocument.positionAt(absStart),
             end: textDocument.positionAt(absEnd),
@@ -782,6 +776,7 @@ connection.languages.semanticTokens.on((params) => {
   let lastLine = 0, lastCol = 0;
 
   const pushToken = (tLine, tCol, length, tType) => {
+    if (length <= 0) return;
     const lineDelta = tLine - lastLine;
     const colDelta  = lineDelta === 0 ? tCol - lastCol : tCol;
     data.push(lineDelta, colDelta, length, tType, 0);
@@ -795,141 +790,191 @@ connection.languages.semanticTokens.on((params) => {
     }
   };
 
-  while (pos < text.length) {
-    const ch = text[pos];
-
-    if (ch === '\n') { line++; col = 0; pos++; continue; }
-
-    if (/[ \t\r]/.test(ch)) { col++; pos++; continue; }
-
-    if (text.startsWith('//', pos)) {
-      const sl = line, sc = col;
-      let end = text.indexOf('\n', pos);
-      if (end === -1) end = text.length;
-      pushToken(sl, sc, end - pos, TT_COMMENT);
-      advanceTo(end);
-      pos = end;
-      continue;
-    }
-
-    if (text.startsWith('/*', pos)) {
-      const sl = line, sc = col, start = pos;
-      let end = text.indexOf('*/', pos + 2);
-      if (end === -1) end = text.length; else end += 2;
-      const seg = text.slice(start, end).split('\n');
-      for (let i = 0; i < seg.length; i++) {
-        if (seg[i].length > 0) pushToken(sl + i, i === 0 ? sc : 0, seg[i].length, TT_COMMENT);
+  const emitStringSlice = (startIdx, endIdx) => {
+    if (endIdx <= startIdx) return;
+    const seg = text.slice(startIdx, endIdx).split('\n');
+    const sl = line, sc = col;
+    for (let i = 0; i < seg.length; i++) {
+      if (seg[i].length > 0) {
+        pushToken(sl + i, i === 0 ? sc : 0, seg[i].length, TT_STRING);
       }
-      advanceTo(end);
-      line = sl + seg.length - 1;
-      col = seg[seg.length - 1].length;
-      pos = end;
-      continue;
     }
+    advanceTo(endIdx);
+    line = sl + seg.length - 1;
+    col = seg.length > 1 ? seg[seg.length - 1].length : sc + seg[0].length;
+    pos = endIdx;
+  };
 
-    if (text.startsWith('/!', pos)) {
-      const sl = line, sc = col, start = pos;
-      let end = text.indexOf('!/', pos + 2);
-      if (end === -1) end = text.length; else end += 2;
-      const seg = text.slice(start, end).split('\n');
-      for (let i = 0; i < seg.length; i++) {
-        if (seg[i].length > 0) pushToken(sl + i, i === 0 ? sc : 0, seg[i].length, TT_COMMENT);
+  const tokenizeNormal = (stopAtBraceDepthZero) => {
+    let localBraceDepth = 0;
+
+    while (pos < text.length) {
+      const ch = text[pos];
+
+      if (stopAtBraceDepthZero && ch === '}' && localBraceDepth === 0) {
+        return;
       }
-      advanceTo(end);
-      line = sl + seg.length - 1;
-      col = seg[seg.length - 1].length;
-      pos = end;
-      continue;
-    }
 
-    if (ch === "'") {
-      const sl = line, sc = col;
-      let end = pos + 1;
-      if (end < text.length && text[end] === '\\') end += 2; else end++;
-      if (end < text.length && text[end] === "'") end++;
-      pushToken(sl, sc, end - pos, TT_STRING);
-      col += end - pos;
-      pos = end;
-      continue;
-    }
+      if (ch === '\n') { line++; col = 0; pos++; continue; }
 
-    if (ch === '"') {
-      const sl = line, sc = col, start = pos;
-      let end = pos + 1;
-      while (end < text.length && !(text[end] === '"' && text[end - 1] !== '\\')) end++;
-      if (end < text.length) end++;
-      pushToken(sl, sc, end - start, TT_STRING);
-      advanceTo(end);
-      pos = end;
-      continue;
-    }
+      if (/[ \t\r]/.test(ch)) { col++; pos++; continue; }
 
-    if (/[0-9]/.test(ch) || (ch === '.' && /[0-9]/.test(text[pos + 1] || ''))) {
-      const sl = line, sc = col, start = pos;
-      if (ch === '0' && (text[pos + 1] === 'x' || text[pos + 1] === 'X')) {
-        pos += 2;
-        while (pos < text.length && /[0-9a-fA-F_]/.test(text[pos])) pos++;
-      } else {
-        while (pos < text.length && /[0-9_]/.test(text[pos])) pos++;
-        if (pos < text.length && text[pos] === '.') {
-          pos++;
-          while (pos < text.length && /[0-9_]/.test(text[pos])) pos++;
+      if (text.startsWith('//', pos)) {
+        const sl = line, sc = col;
+        let end = text.indexOf('\n', pos);
+        if (end === -1) end = text.length;
+        pushToken(sl, sc, end - pos, TT_COMMENT);
+        advanceTo(end);
+        pos = end;
+        continue;
+      }
+
+      if (text.startsWith('/*', pos)) {
+        const sl = line, sc = col, start = pos;
+        let end = text.indexOf('*/', pos + 2);
+        if (end === -1) end = text.length; else end += 2;
+        const seg = text.slice(start, end).split('\n');
+        for (let i = 0; i < seg.length; i++) {
+          if (seg[i].length > 0) pushToken(sl + i, i === 0 ? sc : 0, seg[i].length, TT_COMMENT);
         }
-        if (pos < text.length && /[eE]/.test(text[pos])) {
-          pos++;
-          if (pos < text.length && /[+\-]/.test(text[pos])) pos++;
-          while (pos < text.length && /[0-9_]/.test(text[pos])) pos++;
+        advanceTo(end);
+        line = sl + seg.length - 1;
+        col = seg[seg.length - 1].length;
+        pos = end;
+        continue;
+      }
+
+      if (text.startsWith('/!', pos)) {
+        const sl = line, sc = col, start = pos;
+        let end = text.indexOf('!/', pos + 2);
+        if (end === -1) end = text.length; else end += 2;
+        const seg = text.slice(start, end).split('\n');
+        for (let i = 0; i < seg.length; i++) {
+          if (seg[i].length > 0) pushToken(sl + i, i === 0 ? sc : 0, seg[i].length, TT_COMMENT);
         }
-      }
-      pushToken(sl, sc, pos - start, TT_NUMBER);
-      col += pos - start;
-      continue;
-    }
-
-    if (/[a-zA-Z_]/.test(ch)) {
-      const sl = line, sc = col, start = pos;
-      while (pos < text.length && /[a-zA-Z0-9_]/.test(text[pos])) pos++;
-      const word = text.slice(start, pos);
-
-      let peek = pos;
-      while (peek < text.length && /[ \t]/.test(text[peek])) peek++;
-      const nextCh = text[peek];
-
-      let tt;
-      if (KEYWORDS.includes(word)) {
-        tt = TT_KEYWORD;
-      } else if (BUILTIN_FUNCTIONS[word]) {
-        tt = TT_FUNCTION;
-      } else if (nextCh === '(') {
-        tt = TT_FUNCTION;
-      } else if (TYPES.includes(word)) {
-        tt = TT_TYPE;
-      } else if (/^[A-Z]/.test(word)) {
-        tt = TT_TYPE;
-      } else {
-        tt = TT_VARIABLE;
+        advanceTo(end);
+        line = sl + seg.length - 1;
+        col = seg[seg.length - 1].length;
+        pos = end;
+        continue;
       }
 
-      pushToken(sl, sc, word.length, tt);
-      col += word.length;
-      continue;
-    }
+      if (ch === "'") {
+        const sl = line, sc = col;
+        let end = pos + 1;
+        if (end < text.length && text[end] === '\\') end += 2; else end++;
+        if (end < text.length && text[end] === "'") end++;
+        pushToken(sl, sc, end - pos, TT_STRING);
+        col += end - pos;
+        pos = end;
+        continue;
+      }
 
-    if ('+-*/%=<>!&|^~@'.includes(ch)) {
-      pushToken(line, col, 1, TT_OPERATOR);
+      if (ch === '"') {
+        let segStart = pos;
+        let i = pos + 1;
+        while (i < text.length) {
+          if (text[i] === '\\') {
+            i += 2;
+            continue;
+          }
+          if (text[i] === '"') {
+            emitStringSlice(segStart, i + 1);
+            break;
+          }
+          if (text[i] === '{') {
+            emitStringSlice(segStart, i);
+            pushToken(line, col, 1, TT_PUNCTUATION);
+            col++;
+            pos++;
+            tokenizeNormal(true);
+            if (pos < text.length && text[pos] === '}') {
+              pushToken(line, col, 1, TT_PUNCTUATION);
+              col++;
+              pos++;
+            }
+            segStart = pos;
+            i = pos;
+            continue;
+          }
+          i++;
+        }
+        if (i >= text.length && pos < text.length) {
+          emitStringSlice(segStart, text.length);
+        }
+        continue;
+      }
+
+      if (/[0-9]/.test(ch) || (ch === '.' && /[0-9]/.test(text[pos + 1] || ''))) {
+        const sl = line, sc = col, start = pos;
+        if (ch === '0' && (text[pos + 1] === 'x' || text[pos + 1] === 'X')) {
+          pos += 2;
+          while (pos < text.length && /[0-9a-fA-F_]/.test(text[pos])) pos++;
+        } else {
+          while (pos < text.length && /[0-9_]/.test(text[pos])) pos++;
+          if (pos < text.length && text[pos] === '.') {
+            pos++;
+            while (pos < text.length && /[0-9_]/.test(text[pos])) pos++;
+          }
+          if (pos < text.length && /[eE]/.test(text[pos])) {
+            pos++;
+            if (pos < text.length && /[+\-]/.test(text[pos])) pos++;
+            while (pos < text.length && /[0-9_]/.test(text[pos])) pos++;
+          }
+        }
+        pushToken(sl, sc, pos - start, TT_NUMBER);
+        col += pos - start;
+        continue;
+      }
+
+      if (/[a-zA-Z_]/.test(ch)) {
+        const sl = line, sc = col, start = pos;
+        while (pos < text.length && /[a-zA-Z0-9_]/.test(text[pos])) pos++;
+        const word = text.slice(start, pos);
+
+        let peek = pos;
+        while (peek < text.length && /[ \t]/.test(text[peek])) peek++;
+        const nextCh = text[peek];
+
+        let tt;
+        if (KEYWORDS.includes(word)) {
+          tt = TT_KEYWORD;
+        } else if (BUILTIN_FUNCTIONS[word]) {
+          tt = TT_FUNCTION;
+        } else if (nextCh === '(') {
+          tt = TT_FUNCTION;
+        } else if (TYPES.includes(word)) {
+          tt = TT_TYPE;
+        } else if (/^[A-Z]/.test(word)) {
+          tt = TT_TYPE;
+        } else {
+          tt = TT_VARIABLE;
+        }
+
+        pushToken(sl, sc, word.length, tt);
+        col += word.length;
+        continue;
+      }
+
+      if ('+-*/%=<>!&|^~@'.includes(ch)) {
+        pushToken(line, col, 1, TT_OPERATOR);
+        col++; pos++;
+        continue;
+      }
+
+      if ('(){}[],.;:'.includes(ch)) {
+        if (ch === '{') localBraceDepth++;
+        else if (ch === '}') localBraceDepth--;
+        pushToken(line, col, 1, TT_PUNCTUATION);
+        col++; pos++;
+        continue;
+      }
+
       col++; pos++;
-      continue;
     }
+  };
 
-    if ('(){}[],.;:'.includes(ch)) {
-      pushToken(line, col, 1, TT_PUNCTUATION);
-      col++; pos++;
-      continue;
-    }
-
-    col++; pos++;
-  }
-
+  tokenizeNormal(false);
   return { data };
 });
 
