@@ -4,16 +4,22 @@
 //==========================================================================//
 //  CodeGenerator.hpp  -  DECLARATIONS ONLY                                 //
 //                                                                          //
-//  File layout:                                                            //
-//    CodeGenerator.hpp  -> this file: the class + helper declarations      //
-//    CodeGenerator.cpp  -> core: types, operators, visitors                //
-//    Builtins.cpp       -> builtins: Printf/Println, Range, Random, C libs //
+//  File layout (see docs/ADDING_FEATURES.md):                              //
+//    CodeGenerator.hpp   this file: the class + all declarations           //
+//    StringUtil.*        literal helpers (unescape, \e, \x1b ...)          //
+//    DynArray.*          '?'-dimension array descriptors                   //
+//    Core/               types, scopes, functions, unsigned, lvalues       //
+//    Visitors/           one file per group of AST nodes                   //
+//    Builtins/           Printf, Range, Random, Read, Libc, Math ...       //
 //==========================================================================//
 
 #include "../Parser/Ast.hpp"
 #include "../Parser/Parser.hpp"
 #include "../Parser/RangeUtil.hpp"
 #include "../Lexer/Lexer.hpp"
+
+#include "DynArray.hpp"
+#include "StringUtil.hpp"
 
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Intrinsics.h"
@@ -32,53 +38,6 @@
 #include <vector>
 
 //==========================================================================//
-//  Small string helpers (literal handling)                                 //
-//==========================================================================//
-namespace codegen_detail {
-
-// Removes one pair of surrounding quotes if the lexer kept them.
-inline std::string stripQuotes(const std::string& s) {
-	if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') ||
-	                      (s.front() == '\'' && s.back() == '\''))) {
-		return s.substr(1, s.size() - 2);
-	}
-	return s;
-}
-
-// Turns the two characters '\' 'n' into a real newline, etc.
-// (harmless if the lexer already did it).
-inline std::string unescape(const std::string& s) {
-	std::string out;
-	out.reserve(s.size());
-	for (size_t i = 0; i < s.size(); ++i) {
-		if (s[i] == '\\' && i + 1 < s.size()) {
-			switch (s[++i]) {
-				case 'n':  out += '\n'; break;
-				case 't':  out += '\t'; break;
-				case 'r':  out += '\r'; break;
-				case '0':  out += '\0'; break;
-				case '\\': out += '\\'; break;
-				case '"':  out += '"';  break;
-				case '\'': out += '\''; break;
-				default:   out += '\\'; out += s[i]; break;
-			}
-		} else {
-			out += s[i];
-		}
-	}
-	return out;
-}
-
-inline std::string trim(const std::string& s) {
-	size_t b = s.find_first_not_of(" \t\r\n");
-	if (b == std::string::npos) return "";
-	size_t e = s.find_last_not_of(" \t\r\n");
-	return s.substr(b, e - b + 1);
-}
-
-} // namespace codegen_detail
-
-//==========================================================================//
 //  CodeGenerator                                                           //
 //==========================================================================//
 class CodeGenerator : public ASTVisitor {
@@ -93,7 +52,7 @@ public:
 	[[nodiscard]] bool hasErrors() const { return errorCount > 0; }
 
 	//----------------------------------------------------------------------//
-	//  Builtins API                                           [Builtins.cpp] //
+	//  Builtins API                                            [Builtins/] //
 	//----------------------------------------------------------------------//
 	void registerBuiltin(const std::string& name, BuiltinHandler handler);
 
@@ -108,7 +67,7 @@ public:
 	void declareImportedFunctions(Expression* moduleRoot);
 
 	//----------------------------------------------------------------------//
-	//  Visitors                                            [CodeGenerator.cpp] //
+	//  Visitors                                         [Core/, Visitors/] //
 	//----------------------------------------------------------------------//
 	void visit(LiteralExpr& node) override;
 	void visit(IdentifierExpr& node) override;
@@ -179,9 +138,17 @@ private:
 	void transferHeapSlot(VarInfo* var, llvm::Value* slot);
 
 	//----------------------------------------------------------------------//
-	//  Builtins internals                                     [Builtins.cpp] //
+	//  Builtins internals                                      [Builtins/] //
 	//----------------------------------------------------------------------//
-	void registerBuiltins();   // >>> ADD YOUR BUILTINS HERE <<<
+	void registerBuiltins();        // Builtins/Builtins.cpp: calls every module below
+	// One register function per module (each lives in Builtins/<Module>.cpp):
+	void registerFormatBuiltins();  // Printf, Println
+	void registerRangeBuiltins();   // Range
+	void registerRandomBuiltins();  // Random
+	void registerReadBuiltins();    // Read
+	void registerLibcBuiltins();    // Exit, Puts, Abs
+	void registerMathBuiltins();    // Sqrt, Pow, Min, Max  (example module)
+	// >>> DECLARE YOUR NEW MODULE HERE: void registerYourBuiltins(); <<<
 	ExprPtr parseInlineExpression(const std::string& src);
 	bool appendFormatArg(llvm::Value*& v, std::string& fmt);
 	llvm::Value* emitFormatted(CallExpr& call, bool newline);
@@ -191,7 +158,7 @@ private:
 	bool constI32(Expression* e, long long& out);
 
 	//----------------------------------------------------------------------//
-	//  Type system                                         [CodeGenerator.cpp] //
+	//  Type system                                      [Core/, Visitors/] //
 	//----------------------------------------------------------------------//
 	llvm::Type*  mapType(const TypeDesc& d);
 	llvm::Value* toBool(llvm::Value* v);
@@ -203,7 +170,7 @@ private:
 	llvm::Type*  pointeeOf(const TypeDesc& d);
 
 	//----------------------------------------------------------------------//
-	//  Unsigned support                                    [CodeGenerator.cpp] //
+	//  Unsigned support                                 [Core/, Visitors/] //
 	//----------------------------------------------------------------------//
 	bool parseIntLiteral(LiteralExpr& lit, bool& neg, unsigned long long& mag);
 	bool evalConstInt(Expression* e, bool& neg, unsigned long long& mag);
@@ -213,7 +180,7 @@ private:
 	void emitNegativeCheck(llvm::Value* v, const std::string& what);
 
 	//----------------------------------------------------------------------//
-	//  Helpers                                             [CodeGenerator.cpp] //
+	//  Helpers                                          [Core/, Visitors/] //
 	//----------------------------------------------------------------------//
 	void error(const std::string& msg);
 	llvm::Value* emit(Expression* e);
