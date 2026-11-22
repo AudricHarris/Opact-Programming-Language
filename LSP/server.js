@@ -15,10 +15,9 @@ const { TextDocument } = require('vscode-languageserver-textdocument');
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 
-
 const KEYWORDS = [
   'if', 'else', 'for', 'while', 'range', 'yield', 'return', 'match', 'new',
-  'export', 'import', 'static', 'self', 'Sequential', 'as' ,
+  'export', 'import', 'static', 'self', 'Sequential', 'as',
   'true', 'false', 'public', 'private', 'protected',
   'const', 'class', 'implement', 'impl', 'struct', 'extern',
   'embed', 'fn', 'mut', 'enum', 'sum', 'let', 'trait', 'project', 'dependencies',
@@ -36,14 +35,17 @@ const TYPES = [
 const DIRECTIVES = ['STRICT', 'WARN_UNUSED', 'NO_GLOBALS'];
 
 const BUILTIN_FUNCTIONS = {
-  'Print':    { sig: 'Print(value: any)',            doc: 'Print a value to stdout without a newline.' },
-  'Printf':   { sig: 'Printf(fmt: str, ...args)',    doc: 'Formatted print. Use {var} for interpolation and \\n for newlines.' },
-  'Warn':     { sig: 'Warn(value: any)',             doc: 'Print a warning to stderr.' },
-  'Warnf':   { sig: 'Warnf(fmt: str, ...args)',     doc: 'Formatted warning to stderr.' },
-  'Read':     { sig: 'Read() -> str',                doc: 'Read a line of input from stdin. Returns trimmed string.' },
-  'Random':   { sig: 'Random() -> f64',              doc: 'Return a random f64 in [0, 1).' },
-  'RandomInt':{ sig: 'RandomInt(min: i32, max: i32) -> i32', doc: 'Return a random integer in [min, max].' },
-  'print':    { sig: 'print(value: any)',            doc: 'Print a value to stdout.' },
+  'Print':     { sig: 'Print(value: any)',                  doc: 'Print a value to stdout without a newline.' },
+  'Println':   { sig: 'Println(value: any)',                doc: 'Print a value to stdout with a newline.' },
+  'Printf':    { sig: 'Printf(fmt: str, ...args)',          doc: 'Formatted print. Use {var} for interpolation and \\n for newlines.' },
+  'Warn':      { sig: 'Warn(value: any)',                   doc: 'Print a warning to stderr.' },
+  'Warnf':     { sig: 'Warnf(fmt: str, ...args)',           doc: 'Formatted warning to stderr.' },
+  'Read':      { sig: 'Read() -> str',                      doc: 'Read a line of input from stdin. Returns trimmed string.' },
+  'ReadChar':  { sig: 'ReadChar() -> char',                 doc: 'Read a single character from stdin.' },
+  'Range':     { sig: 'Range(end: int) / Range(start, end)', doc: 'Generate an integer range for use in for-loops.' },
+  'Random':    { sig: 'Random() -> f64',                    doc: 'Return a random f64 in [0, 1).' },
+  'RandomInt': { sig: 'RandomInt(max: int) -> int',         doc: 'Return a random integer in [0, max).' },
+  'print':     { sig: 'print(value: any)',                  doc: 'Print a value to stdout.' },
 };
 
 const SNIPPETS = {
@@ -52,8 +54,20 @@ const SNIPPETS = {
     doc: 'Class declaration',
   },
   'struct': {
-    insert: 'struct ${1:Name}\n{\n\t${2:field}: ${3:type};\n\t$0\n}',
+    insert: 'struct ${1:Name}\n{\n\t${2:char[?][?]} ${3:field};\n\t$0\n}',
     doc: 'Struct declaration',
+  },
+  'structinit': {
+    insert: '${1:StructName} ${2:instance} = ${1:StructName}{ ${3:char[10][10]} ${4:zone} };',
+    doc: 'Struct initialization',
+  },
+  'forrange': {
+    insert: 'for (${1:int} ${2:i} : Range(${3:0}, ${4:length}))\n{\n\t$0\n}',
+    doc: 'For loop over a Range',
+  },
+  'foreach': {
+    insert: 'for (${1:char} ${2:item} : ${3:collection})\n{\n\t$0\n}',
+    doc: 'For-each loop over a collection',
   },
   'enum': {
     insert: 'enum ${1:TypeName}\n{\n\t${2:Variant}\n}',
@@ -204,6 +218,24 @@ function extractDirectives(text) {
   return directives;
 }
 
+function extractStructDefinitions(text) {
+  const structs = new Map();
+  const structBlockRx = /\bstruct\s+([A-Z][a-zA-Z0-9_]*)\s*\{([\s\S]*?)\}/g;
+  let m;
+  while ((m = structBlockRx.exec(text)) !== null) {
+    const structName = m[1];
+    const body = m[2];
+    const fields = [];
+    const fieldRx = /([a-zA-Z_][a-zA-Z0-9_<>\[\]\?]*)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*;/g;
+    let fm;
+    while ((fm = fieldRx.exec(body)) !== null) {
+      fields.push({ type: fm[1], name: fm[2] });
+    }
+    structs.set(structName, fields);
+  }
+  return structs;
+}
+
 function extractSymbols(text, docUri) {
   const wsKey = resolveWorkspace(docUri);
   const store = getSymbolStore(wsKey);
@@ -214,7 +246,7 @@ function extractSymbols(text, docUri) {
 
   let m;
 
-  const fnRx = /\bfn\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*(?:->\s*([a-zA-Z0-9_<>\[\]]+))?\s*\{/gm;
+  const fnRx = /\bfn\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*(?:->\s*([a-zA-Z0-9_<>\[\]&]+))?\s*\{/gm;
   while ((m = fnRx.exec(text)) !== null) {
     const name = m[1];
     const params = m[2].trim();
@@ -227,7 +259,7 @@ function extractSymbols(text, docUri) {
     });
   }
 
-  const legacyFnRx = /^([A-Z][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*(?:->\s*([a-zA-Z0-9_<>\[\]]+))?\s*\{/gm;
+  const legacyFnRx = /^([A-Z][a-zA-Z0-9_]*)\s*\(([^)]*)\)\s*(?:->\s*([a-zA-Z0-9_<>\[\]&]+))?\s*\{/gm;
   while ((m = legacyFnRx.exec(text)) !== null) {
     const name = m[1];
     const params = m[2].trim();
@@ -247,9 +279,16 @@ function extractSymbols(text, docUri) {
     store.set(m[1], { kind: CompletionItemKind.Class, detail: `class ${m[1]}`, doc: 'User-defined class', uri: docUri });
   }
 
-  const structRx = /\bstruct\s+([A-Z][a-zA-Z0-9_]*)/g;
-  while ((m = structRx.exec(text)) !== null) {
-    store.set(m[1], { kind: CompletionItemKind.Struct, detail: `struct ${m[1]}`, doc: 'User-defined struct', uri: docUri });
+  const structs = extractStructDefinitions(text);
+  for (const [structName, fields] of structs.entries()) {
+    const fieldSummary = fields.map(f => `${f.type} ${f.name}`).join('; ');
+    store.set(structName, {
+      kind: CompletionItemKind.Struct,
+      detail: `struct ${structName} { ${fieldSummary}${fields.length ? ';' : ''} }`,
+      doc: 'User-defined struct',
+      uri: docUri,
+      fields,
+    });
   }
 
   const enumRx = /\b(?:enum|sum)\s+([A-Z][a-zA-Z0-9_]*)/g;
@@ -258,7 +297,7 @@ function extractSymbols(text, docUri) {
   }
 
   const typePattern = TYPES.join('|');
-  const varRx = new RegExp(`\\b(?:${typePattern})(?:<[^>]+>)?(?:\\[\\])*\\s+([a-z_][a-zA-Z0-9_]*)`, 'g');
+  const varRx = new RegExp(`\\b(?:${typePattern})(?:<[^>]+>)?(?:\\[[^\\]]*\\])*\\s+([a-z_][a-zA-Z0-9_]*)`, 'g');
   while ((m = varRx.exec(text)) !== null) {
     const name = m[1];
     if (!store.has(name)) {
@@ -291,6 +330,7 @@ documents.onDidOpen(async event => {
   const doc = event.document;
   await mapDocumentToWorkspace(doc.uri);
   extractSymbols(doc.getText(), doc.uri);
+  validateTextDocument(doc);
 });
 
 documents.onDidClose(event => {
@@ -340,7 +380,7 @@ connection.onHover((params) => {
       'WARN_UNUSED': '**Directive: `WARN_UNUSED`**\n\nWarns about declared but unused variables.\n\n```nexus\n/![WARN_UNUSED]!/\n```',
       'NO_GLOBALS': '**Directive: `NO_GLOBALS`**\n\nDisallows global variable declarations.\n\n```nexus\n/![NO_GLOBALS]!/\n```'
     };
-    
+
     if (docs[directive]) {
       return {
         contents: {
@@ -387,6 +427,20 @@ connection.onWorkspaceSymbol((params) => {
   return results;
 });
 
+function getCollectionCandidates(text) {
+  const candidates = [];
+  const arrVarRx = /\b(?:[a-zA-Z_][a-zA-Z0-9_]*)(?:\[[^\]]*\])+\s+([a-zA-Z_][a-zA-Z0-9_]*)/g;
+  let m;
+  while ((m = arrVarRx.exec(text)) !== null) {
+    if (!candidates.includes(m[1])) candidates.push(m[1]);
+  }
+  const propRx = /\b([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_.]*)\b/g;
+  while ((m = propRx.exec(text)) !== null) {
+    if (!candidates.includes(m[1])) candidates.push(m[1]);
+  }
+  return candidates.slice(0, 6);
+}
+
 connection.onCompletion((params) => {
   const doc = documents.get(params.textDocument.uri);
   const completions = [];
@@ -428,8 +482,49 @@ connection.onCompletion((params) => {
   }));
 
   if (doc) {
+    const text = doc.getText();
     const store = getSymbolStore(resolveWorkspace(doc.uri));
+
+    // Contextual for-range and for-each suggestions
+    const collections = getCollectionCandidates(text);
+    completions.push({
+      label: 'for (int i : Range(...))',
+      kind: CompletionItemKind.Snippet,
+      insertText: 'for (${1:int} ${2:i} : Range(${3:0}, ${4:n}))\n{\n\t$0\n}',
+      insertTextFormat: InsertTextFormat.Snippet,
+      detail: 'For loop over integer range',
+      sortText: '0_for_range',
+      data: { type: 'snippet', name: 'forrange' },
+    });
+
+    collections.forEach((colName, idx) => {
+      completions.push({
+        label: `for (... : ${colName})`,
+        kind: CompletionItemKind.Snippet,
+        insertText: `for (\${1:char} \${2:item} : ${colName})\n{\n\t$0\n}`,
+        insertTextFormat: InsertTextFormat.Snippet,
+        detail: `For-each loop over ${colName}`,
+        sortText: `0_for_each_${idx}`,
+        data: { type: 'snippet', name: 'foreach' },
+      });
+    });
+
+    // Struct initialization completions
     for (const [name, info] of store) {
+      if (info.kind === CompletionItemKind.Struct) {
+        const fieldsInit = (info.fields || [])
+          .map((f, idx) => `\${${idx + 2}:${f.type}} \${${idx + 2 + (info.fields.length || 0)}:${f.name}}`)
+          .join(', ');
+        completions.push({
+          label: `${name}{ ... }`,
+          kind: CompletionItemKind.Constructor,
+          insertText: `${name}{ ${fieldsInit || '\${2:value}'} }`,
+          insertTextFormat: InsertTextFormat.Snippet,
+          detail: `Initialize ${name}`,
+          data: { type: 'user_symbol', name },
+        });
+      }
+
       if (BUILTIN_FUNCTIONS[name] || KEYWORDS.includes(name) || TYPES.includes(name)) continue;
       completions.push({
         label: name,
@@ -477,10 +572,77 @@ connection.onCompletionResolve((item) => {
   return item;
 });
 
+function validateNonMutableReferences(text, textDocument, diagnostics) {
+  // Find functions and inspect parameters declared as `&Type name` (without `&mut`)
+  const fnHeaderRx = /\bfn\s+[a-zA-Z_][a-zA-Z0-9_]*\s*\(([^)]*)\)\s*(?:->\s*[^{]+)?\{/g;
+  let match;
+
+  while ((match = fnHeaderRx.exec(text)) !== null) {
+    const paramsStr = match[1];
+    const bodyStart = match.index + match[0].length - 1;
+
+    // Locate matching closing brace for the function body
+    let depth = 0;
+    let bodyEnd = -1;
+    for (let i = bodyStart; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          bodyEnd = i;
+          break;
+        }
+      }
+    }
+    if (bodyEnd === -1) continue;
+
+    const nonMutRefs = new Set();
+    const params = paramsStr.split(',').map(p => p.trim()).filter(Boolean);
+    for (const p of params) {
+      // Matches `&mut Type name` vs `&Type name`
+      if (/^&\s*mut\b/.test(p)) continue;
+      const refMatch = p.match(/^&[^a-zA-Z0-9_]*[a-zA-Z_][a-zA-Z0-9_<>\[\]\?]*\s+([a-zA-Z_][a-zA-Z0-9_]*)$/);
+      if (refMatch) {
+        nonMutRefs.add(refMatch[1]);
+      }
+    }
+
+    if (nonMutRefs.size === 0) continue;
+
+    const bodyText = text.slice(bodyStart + 1, bodyEnd);
+    const bodyOffsetBase = bodyStart + 1;
+
+    for (const refName of nonMutRefs) {
+      // Matches direct assignment (`ref = ...`, `ref += ...`), field/index mutation (`ref.x = ...`, `ref[0] = ...`), or `++` / `--`
+      const mutationRx = new RegExp(
+        `\\b${refName}\\b(?:\\s*(?:\\.\\s*[a-zA-Z_][a-zA-Z0-9_]*|\\[[^\\]]*\\]))*\\s*(?:\\+\\+|--|(?:\\+=|-=|\\*=|\\/=|%=|=(?!=)))`,
+        'g'
+      );
+
+      let mutMatch;
+      while ((mutMatch = mutationRx.exec(bodyText)) !== null) {
+        const absStart = bodyOffsetBase + mutMatch.index;
+        const absEnd = absStart + refName.length;
+        diagnostics.push({
+          severity: 1, // Error
+          range: {
+            start: textDocument.positionAt(absStart),
+            end: textDocument.positionAt(absEnd),
+          },
+          message: "you can't update non mutable reference",
+          source: 'nexus-lsp',
+        });
+      }
+    }
+  }
+}
+
 function validateTextDocument(textDocument) {
   const text = textDocument.getText();
   const diagnostics = [];
-  
+
+  validateNonMutableReferences(text, textDocument, diagnostics);
+
   const directives = extractDirectives(text);
   const isStrict = directives.includes('STRICT');
   const warnUnused = directives.includes('WARN_UNUSED');
@@ -494,7 +656,7 @@ function validateTextDocument(textDocument) {
       const startPos = textDocument.positionAt(pos);
       const endPos = textDocument.positionAt(pos + 3);
       diagnostics.push({
-        severity: 1, // Error
+        severity: 1,
         range: { start: startPos, end: endPos },
         message: "'let' keyword is not allowed in STRICT mode. Use explicit types instead.",
         source: 'nexus-lsp',
@@ -506,22 +668,22 @@ function validateTextDocument(textDocument) {
     const lines = text.split('\n');
     let inFunction = false;
     let braceDepth = 0;
-    
+
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const trimmed = line.trim();
-      
+
       if (trimmed.startsWith('fn ') || (trimmed.match(/^[A-Z][a-zA-Z0-9_]*\s*\(/) && !trimmed.startsWith('//'))) {
         inFunction = true;
       }
-      
+
       braceDepth += (line.match(/\{/g) || []).length;
       braceDepth -= (line.match(/\}/g) || []).length;
-      
+
       if (braceDepth === 0) {
         inFunction = false;
       }
-      
+
       if (!inFunction && braceDepth === 0 && !trimmed.startsWith('//') && !trimmed.startsWith('/*') && !trimmed.startsWith('*')) {
         const globalVarRegex = /^(?!(?:fn|class|struct|enum|sum|impl|import|export|pub|using))\s*([a-zA-Z_][a-zA-Z0-9_<>]*\s+[a-zA-Z_][a-zA-Z0-9_]*\s*[=;])/;
         const match = line.match(globalVarRegex);
@@ -542,9 +704,9 @@ function validateTextDocument(textDocument) {
 
   if (warnUnused) {
     const declaredVars = new Map();
-    const varDeclRegex = /(?:\b(?:i32|i64|i16|i8|u32|u64|f32|f64|bool|char|str|string)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:=|[;]))|(?:let\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:=|[;]))/g;
+    const varDeclRegex = /(?:\b(?:i32|i64|i16|i8|u32|u64|f32|f64|bool|char|str|string|int)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:=|[;]))|(?:let\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:=|[;]))/g;
     let varMatch;
-    
+
     while ((varMatch = varDeclRegex.exec(text)) !== null) {
       const varName = varMatch[1] || varMatch[2];
       if (varName && !varName.match(/^_/)) {
@@ -556,23 +718,23 @@ function validateTextDocument(textDocument) {
         });
       }
     }
-    
+
     for (const [name, info] of declaredVars) {
       const usageRegex = new RegExp(`\\b${name}\\b`, 'g');
       let usageMatch;
       let firstMatchPos = -1;
       let usageCount = 0;
-      
+
       while ((usageMatch = usageRegex.exec(text)) !== null) {
         if (firstMatchPos === -1) firstMatchPos = usageMatch.index;
         if (Math.abs(usageMatch.index - info.position.character) > name.length) {
           usageCount++;
         }
       }
-      
+
       if (usageCount === 0 && firstMatchPos !== -1) {
         diagnostics.push({
-          severity: 2, // Warning
+          severity: 2,
           range: {
             start: info.position,
             end: { line: info.position.line, character: info.position.character + name.length }
@@ -609,7 +771,6 @@ function validateTextDocument(textDocument) {
   connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
 }
 
-
 connection.languages.semanticTokens.on((params) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return { data: [] };
@@ -641,8 +802,6 @@ connection.languages.semanticTokens.on((params) => {
 
     if (/[ \t\r]/.test(ch)) { col++; pos++; continue; }
 
-   
-
     if (text.startsWith('//', pos)) {
       const sl = line, sc = col;
       let end = text.indexOf('\n', pos);
@@ -668,7 +827,7 @@ connection.languages.semanticTokens.on((params) => {
       continue;
     }
 
-    if (text.startsWith('/!', pos) ) {
+    if (text.startsWith('/!', pos)) {
       const sl = line, sc = col, start = pos;
       let end = text.indexOf('!/', pos + 2);
       if (end === -1) end = text.length; else end += 2;
