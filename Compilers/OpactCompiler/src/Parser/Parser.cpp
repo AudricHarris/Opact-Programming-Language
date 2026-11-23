@@ -1033,7 +1033,12 @@ ExprPtr Parser::parsePostfix(ExprPtr expr)
 						}
 
 						Token nameTok = this->expect(TokenKind::IDENTIFIER, "Expected name after array type");
-						args.push_back(makeNode<ArrayAllocExpr>(typeTok, std::move(desc), nameTok.getWord()));
+						std::optional<ExprPtr> initExpr = std::nullopt;
+						if (this->match(TokenKind::ASSIGN))
+						{
+							initExpr = this->parseExpression();
+						}
+						args.push_back(makeNode<ArrayAllocExpr>(typeTok, std::move(desc), nameTok.getWord(), std::move(initExpr)));
 					} else {
 						args.push_back(this->parseExpression());
 					}

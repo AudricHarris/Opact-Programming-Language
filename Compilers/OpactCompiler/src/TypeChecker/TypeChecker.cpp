@@ -815,8 +815,24 @@ void TypeChecker::visit(ArrayLiteralExpr& node) {
 }
 
 void TypeChecker::visit(ArrayAllocExpr& node) {
-	// 'Tile[20][20] name' evaluates to the array type it describes.
-	currentType = fromDesc(node.type);
+	auto declared = fromDesc(node.type);
+
+	if (node.initExpr && *node.initExpr) {
+		auto initType = valueTypeOf(**node.initExpr);
+		if (!declared->equals(initType.get())) {
+			reportError(
+				node.line,
+				node.col,
+				"Array initializer type mismatch in '" + node.name + "': expected " +
+					declared->toString() + " but got " + initType->toString()
+			);
+		}
+		if (isUnsignedDesc(node.type)) {
+			checkNoNegativeConst(**node.initExpr, "array '" + node.name + "'");
+		}
+	}
+
+	currentType = declared;
 }
 
 void TypeChecker::visit(ArrayIndexExpr& node) {

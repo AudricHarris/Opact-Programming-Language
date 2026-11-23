@@ -454,13 +454,22 @@ struct ArrayLiteralExpr : Expression {
 struct ArrayAllocExpr : Expression {
 	TypeDesc type;
 	std::string name;
+	std::optional<ExprPtr> initExpr;
 
-	ArrayAllocExpr(TypeDesc type, std::string name)
-		: type(std::move(type)), name(std::move(name)) {}
+	ArrayAllocExpr(TypeDesc type, std::string name, std::optional<ExprPtr> initExpr = std::nullopt)
+		: type(std::move(type)), name(std::move(name)), initExpr(std::move(initExpr)) {}
 
 	void accept(ASTVisitor& visitor) override;
-	[[nodiscard]] ExprPtr clone() const override {
-		return std::make_unique<ArrayAllocExpr>(type, name);
+
+	ExprPtr clone() const override {
+		std::optional<ExprPtr> clonedInit;
+		if (initExpr.has_value() && *initExpr) {
+			clonedInit = (*initExpr)->clone();
+		}
+		auto copy = std::make_unique<ArrayAllocExpr>(type, name, std::move(clonedInit));
+		copy->line = line;
+		copy->col = col;
+		return copy;
 	}
 };
 

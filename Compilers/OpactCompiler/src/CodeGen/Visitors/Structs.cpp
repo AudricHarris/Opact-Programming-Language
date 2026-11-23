@@ -43,8 +43,8 @@ void CodeGenerator::visit(StructCreateExpr& node) {
 		return;
 	}
 
-	// `Tile[20][20] name` given to a '?' array field: calloc the storage and
-	// build the { data, dim0, dim1, ... } descriptor.
+	// `Tile[20][20] name` (optionally `= {...}`) given to a '?' array field:
+	// calloc the storage and build the { data, dim0, dim1, ... } descriptor.
 	auto emitDynAlloc = [&](ArrayAllocExpr& alloc, llvm::Type* dynTy) -> llvm::Value* {
 		const DynArrayInfo* dyn = dynInfo(dynTy);
 		if (hasUnknownDim(alloc.type)) {
@@ -77,11 +77,119 @@ void CodeGenerator::visit(StructCreateExpr& node) {
 		llvm::Value* data = builder.CreateCall(callocFn,
 				{ builder.getInt64(count), builder.getInt64(elemSize) }, "dyn_alloc");
 
+		if (alloc.initExpr && *alloc.initExpr) {
+			if (auto* arrLit = dynamic_cast<ArrayLiteralExpr*>(alloc.initExpr->get())) {
+				size_t n = std::min<size_t>(arrLit->elements.size(), static_cast<size_t>(count));
+				for (size_t idx = 0; idx < n; ++idx) {
+					bool prevUnsigned = unsignedCtx;
+					unsignedCtx = alloc.type.isUnsignedInteger();
+					llvm::Value* elemVal = emit(arrLit->elements[idx].get());
+					unsignedCtx = prevUnsigned;
+					if (!elemVal) return nullptr;
+
+					if ((dyn->elemTy->isStructTy() || dyn->elemTy->isArrayTy()) && elemVal->getType()->isPointerTy()) {
+						elemVal = builder.CreateLoad(dyn->elemTy, elemVal, "dyn_init_elem_load");
+					} else {
+						elemVal = coerce(elemVal, dyn->elemTy);
+						if (!elemVal) return nullptr;
+					}
+
+					llvm::Value* dstPtr = builder.CreateInBoundsGEP(
+							dyn->elemTy, data, { builder.getInt64(idx) }, "dyn_init_dst");
+					builder.CreateStore(elemVal, dstPtr);
+				}
+			} else {
+				bool prevUnsigned = unsignedCtx;
+				unsignedCtx = alloc.type.isUnsignedInteger();
+				llvm::Value* initVal = emit(alloc.initExpr->get());
+				unsignedCtx = prevUnsigned;
+				if (!initVal) return nullptr;
+
+				llvm::ArrayType* fixedTy = llvm::ArrayType::get(dyn->elemTy, count);
+				if (initVal->getType()->isPointerTy()) {
+					llvm::Value* loaded = builder.CreateLoad(fixedTy, initVal, "dyn_init_arr_load");
+					llvm::AllocaInst* tmpArr = createEntryAlloca(currentFn, fixedTy, "dyn_init_arr_tmp");
+					builder.CreateStore(loaded, tmpArr);
+					for (uint64_t idx = 0; idx < count; ++idx) {
+						llvm::Value* srcPtr = builder.CreateInBoundsGEP(
+								fixedTy, tmpArr, { builder.getInt64(0), builder.getInt64(idx) }, "dyn_init_src");
+						llvm::Value* elemVal = builder.CreateLoad(dyn->elemTy, srcPtr, "dyn_init_copy_load");
+						llvm::Value* dstPtr = builder.CreateInBoundsGEP(
+								dyn->elemTy, data, { builder.getInt64(idx) }, "dyn_init_dst");
+						builder.CreateStore(elemVal, dstPtr);
+					}
+				}
+			}
+		}
+
 		llvm::Value* desc = llvm::PoisonValue::get(dynTy);
 		desc = builder.CreateInsertValue(desc, data, 0);
 		for (size_t k = 0; k < alloc.type.dim.size(); ++k)
 			desc = builder.CreateInsertValue(desc, builder.getInt64(static_cast<uint64_t>(alloc.type.dim[k])),
 					static_cast<unsigned>(k + 1));
+		return desc;
+	};
+
+	// Convert a fixed-size array value/pointer into a `%dynarray` descriptor.
+	auto emitFixedArrayToDyn = [&](Expression* argExpr, llvm::Type* dynTy) -> llvm::Value* {
+		const DynArrayInfo* dyn = dynInfo(dynTy);
+		if (!dyn || !argExpr) return nullptr;
+
+		llvm::Type* arrTyRaw = nullptr;
+		if (auto* argId = dynamic_cast<IdentifierExpr*>(argExpr)) {
+			if (VarInfo* var = lookupVar(argId->name)) {
+				arrTyRaw = var->pointee ? var->pointee : var->type;
+			}
+		}
+
+		llvm::Value* rawVal = emit(argExpr);
+		if (!rawVal) return nullptr;
+
+		auto* arrTy = llvm::dyn_cast_or_null<llvm::ArrayType>(arrTyRaw);
+		if (!arrTy && rawVal->getType()->isPointerTy()) {
+			if (auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(rawVal->stripPointerCasts())) {
+				arrTy = llvm::dyn_cast<llvm::ArrayType>(allocaInst->getAllocatedType());
+			}
+		}
+
+		if (!arrTy) {
+			return coerce(rawVal, dynTy);
+		}
+
+		uint64_t count = arrTy->getNumElements();
+		uint64_t elemSize = module->getDataLayout().getTypeAllocSize(dyn->elemTy);
+		llvm::Type* i64 = builder.getInt64Ty();
+
+		auto callocFn = module->getOrInsertFunction("calloc",
+				llvm::FunctionType::get(builder.getPtrTy(), { i64, i64 }, false));
+		llvm::Value* data = builder.CreateCall(callocFn,
+				{ builder.getInt64(count), builder.getInt64(elemSize) }, "arr_to_dyn_data");
+
+		llvm::AllocaInst* srcAlloca = createEntryAlloca(currentFn, arrTy, "arr_to_dyn_src_tmp");
+		if (rawVal->getType()->isPointerTy()) {
+			llvm::Value* loadedArr = builder.CreateLoad(arrTy, rawVal, "arr_to_dyn_load");
+			builder.CreateStore(loadedArr, srcAlloca);
+		} else {
+			builder.CreateStore(rawVal, srcAlloca);
+		}
+
+		for (uint64_t idx = 0; idx < count; ++idx) {
+			llvm::Value* srcPtr = builder.CreateInBoundsGEP(
+					arrTy, srcAlloca, { builder.getInt64(0), builder.getInt64(idx) }, "arr_to_dyn_elem_ptr");
+			llvm::Value* elemVal = builder.CreateLoad(arrTy->getElementType(), srcPtr, "arr_to_dyn_elem");
+			elemVal = coerce(elemVal, dyn->elemTy);
+			if (!elemVal) return nullptr;
+
+			llvm::Value* dstPtr = builder.CreateInBoundsGEP(
+					dyn->elemTy, data, { builder.getInt64(idx) }, "arr_to_dyn_dst");
+			builder.CreateStore(elemVal, dstPtr);
+		}
+
+		llvm::Value* desc = llvm::PoisonValue::get(dynTy);
+		desc = builder.CreateInsertValue(desc, data, 0);
+		if (dyn->rank >= 1) {
+			desc = builder.CreateInsertValue(desc, builder.getInt64(count), 1);
+		}
 		return desc;
 	};
 
@@ -105,11 +213,18 @@ void CodeGenerator::visit(StructCreateExpr& node) {
 				alloc && dynInfo(fieldTy)) {
 			argVal = emitDynAlloc(*alloc, fieldTy);
 			if (!argVal) return;
+		} else if (dynInfo(fieldTy)) {
+			argVal = emitFixedArrayToDyn(node.arguments[i].get(), fieldTy);
+			if (!argVal) return;
 		} else {
 			argVal = isUns
 				? emitUnsignedValue(node.arguments[i].get(), fieldTy, "field '" + info.fieldNames[i] + "'")
 				: (isRef ? emitRef(node.arguments[i].get()) : emit(node.arguments[i].get()));
 			if (!argVal) return;
+
+			if (fieldTy->isArrayTy() && argVal->getType()->isPointerTy()) {
+				argVal = builder.CreateLoad(fieldTy, argVal, "arr_field_load");
+			}
 
 			argVal = coerce(argVal, fieldTy);
 			if (!argVal) return;

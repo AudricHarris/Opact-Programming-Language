@@ -85,6 +85,25 @@ void CodeGenerator::visit(ArrayAllocExpr& node) {
 
 	llvm::AllocaInst* slot = createEntryAlloca(currentFn, ty, node.name.empty() ? "array_alloc" : node.name);
 	builder.CreateStore(llvm::Constant::getNullValue(ty), slot);
+
+	if (node.initExpr && *node.initExpr) {
+		bool prevUnsigned = unsignedCtx;
+		unsignedCtx = node.type.isUnsignedInteger();
+		llvm::Value* initVal = emit(node.initExpr->get());
+		unsignedCtx = prevUnsigned;
+
+		if (!initVal) return;
+
+		if (ty->isArrayTy() && initVal->getType()->isPointerTy()) {
+			llvm::Value* loaded = builder.CreateLoad(ty, initVal, "arr_init_load");
+			builder.CreateStore(loaded, slot);
+		} else {
+			llvm::Value* coerced = coerce(initVal, ty);
+			if (!coerced) return;
+			builder.CreateStore(coerced, slot);
+		}
+	}
+
 	lastValue = slot;
 }
 
