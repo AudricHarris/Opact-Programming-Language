@@ -19,9 +19,9 @@ bool CodeGenerator::constI32(Expression* e, long long& out) {
 	return true;
 }
 
-// Range(end) / Range(start, end) / Range(start, end, step) -> [N x i32]
-// `end` is exclusive. Arguments must be integer constants so the array
-// length is known at compile time.
+// Range(end) / Range(start, end) / Range(start, end, step)
+// `end` is exclusive. Constant bounds emit an internal global constant array
+// so returning/coercing to %dynarray never leaves a dangling stack pointer.
 llvm::Value* CodeGenerator::emitRange(CallExpr& call) {
 	if (!currentFn) { error("Range used outside of a function"); return nullptr; }
 
@@ -56,9 +56,16 @@ llvm::Value* CodeGenerator::emitRange(CallExpr& call) {
 			values.push_back(static_cast<int32_t>(start + i * step));
 
 		llvm::Constant* data = llvm::ConstantDataArray::get(context, values); // [count x i32]
-		llvm::AllocaInst* slot = createEntryAlloca(currentFn, data->getType(), "range");
-		builder.CreateStore(data, slot);
-		return slot; // address of the array, like an array literal
+		auto* globalArr = new llvm::GlobalVariable(
+			*module,
+			data->getType(),
+			/*isConstant=*/true,
+			llvm::GlobalValue::InternalLinkage,
+			data,
+			"range_data"
+		);
+
+		return globalArr;
 	}
 
 	// Runtime bounds: emit a "Range" struct { i32 start, i32 end } for ForExpr.

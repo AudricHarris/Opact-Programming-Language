@@ -79,6 +79,7 @@ public:
 	void visit(CastExpr& node) override;
 	void visit(Block& node) override;
 	void visit(IfExpr& node) override;
+	void visit(YieldExpr&) override;
 	void visit(WhileExpr& node) override;
 	void visit(ForExpr& node) override;
 	void visit(LoopExpr& node) override;
@@ -99,7 +100,6 @@ public:
 	// Not implemented yet
 	void visit(GenericCallExpr&) override {}
 	void visit(TupleLiteralExpr&) override {}
-	void visit(YieldExpr&) override {}
 
 private:
 	//----------------------------------------------------------------------//

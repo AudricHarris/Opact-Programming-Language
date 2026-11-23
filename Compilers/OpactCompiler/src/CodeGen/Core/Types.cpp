@@ -97,6 +97,45 @@ llvm::Value* CodeGenerator::coerce(llvm::Value* v, llvm::Type* to) {
 			? builder.CreateFPExt(v, to, "fpext") : builder.CreateFPTrunc(v, to, "fptrunc");
 
 	if (from->isPointerTy() && to->isStructTy()) {
+		auto* dstStruct = llvm::cast<llvm::StructType>(to);
+
+		if (dstStruct->getName() == "dynarray" && dstStruct->getNumElements() >= 2) {
+			llvm::Value* arrPtr = v;
+			uint64_t elemCount = 0;
+
+			if (auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(v)) {
+				if (auto* arrTy = llvm::dyn_cast<llvm::ArrayType>(alloca->getAllocatedType())) {
+					elemCount = arrTy->getNumElements();
+					arrPtr = builder.CreateInBoundsGEP(
+						arrTy,
+						alloca,
+						{ builder.getInt64(0), builder.getInt64(0) },
+						"dyn_arr_ptr"
+					);
+				}
+			} else if (auto* gv = llvm::dyn_cast<llvm::GlobalVariable>(v)) {
+				if (auto* arrTy = llvm::dyn_cast<llvm::ArrayType>(gv->getValueType())) {
+					elemCount = arrTy->getNumElements();
+					arrPtr = builder.CreateInBoundsGEP(
+						arrTy,
+						gv,
+						{ builder.getInt64(0), builder.getInt64(0) },
+						"dyn_gv_ptr"
+					);
+				}
+			}
+
+			llvm::Value* dataPtr = (elemCount == 0)
+				? llvm::ConstantPointerNull::get(builder.getPtrTy())
+				: builder.CreatePointerCast(arrPtr, builder.getPtrTy(), "dyn_data_cast");
+			llvm::Value* lenVal = llvm::ConstantInt::get(builder.getInt64Ty(), elemCount);
+
+			llvm::Value* desc = llvm::PoisonValue::get(dstStruct);
+			desc = builder.CreateInsertValue(desc, dataPtr, 0);
+			desc = builder.CreateInsertValue(desc, lenVal, 1);
+			return desc;
+		}
+
 		return builder.CreateLoad(to, v, "struct_coerce_load");
 	}
 

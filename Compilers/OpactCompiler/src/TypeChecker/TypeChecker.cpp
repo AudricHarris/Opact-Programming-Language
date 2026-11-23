@@ -1019,6 +1019,14 @@ void TypeChecker::visit(IfExpr& node) {
 	}
 }
 
+void TypeChecker::visit(YieldExpr& node) {
+	if (!node.expr) {
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+	currentType = valueTypeOf(*node.expr);
+}
+
 void TypeChecker::visit(WhileExpr& node) {
 	if (node.condition) {
 		auto c = valueTypeOf(*node.condition);

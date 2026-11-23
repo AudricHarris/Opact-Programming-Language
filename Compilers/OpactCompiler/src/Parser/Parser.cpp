@@ -555,10 +555,13 @@ ExprPtr Parser::parseBlock()
 	{
 		try {
 			ExprPtr expr = this->parseExpression();
+			bool isYield = dynamic_cast<YieldExpr*>(expr.get()) != nullptr;
 			if (expr != nullptr)
 				expressions.push_back(std::move(expr));
 
-			this->expect(TokenKind::SEMI, "Expected ';' after statement");
+			if (!isYield && !this->check(TokenKind::SEMI)) {
+				this->expect(TokenKind::SEMI, "Expected ';' after statement");
+			}
 		} catch (const std::exception& e) {
 			this->synchronize();
 		}
@@ -582,9 +585,6 @@ ExprPtr Parser::parseExpression()
 	if (this->check(TokenKind::YIELD))
 		return this->parseYield();
 
-	if (this->check(TokenKind::IDENTIFIER))
-		return this->parseReturn();
-	
 	if (this->check(TokenKind::WHILE))
 		return this->parseWhile();
 

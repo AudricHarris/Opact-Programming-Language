@@ -47,15 +47,40 @@ void CodeGenerator::visit(IfExpr& node) {
 
 	builder.SetInsertPoint(thenBB);
 	emit(node.ifBranch.get());
+	llvm::Value* thenVal = lastValue;
 	branchIfOpen(mergeBB);
+	llvm::BasicBlock* thenEndBB = builder.GetInsertBlock();
+	bool thenReachesMerge = !thenEndBB->empty() && thenEndBB->back().isTerminator() &&
+	                        thenEndBB->back().getSuccessor(0) == mergeBB;
+
+	llvm::Value* elseVal = nullptr;
+	llvm::BasicBlock* elseEndBB = nullptr;
+	bool elseReachesMerge = false;
 
 	if (elseBB) {
 		builder.SetInsertPoint(elseBB);
 		emit(node.elseBranch->get());
+		elseVal = lastValue;
 		branchIfOpen(mergeBB);
+		elseEndBB = builder.GetInsertBlock();
+		elseReachesMerge = !elseEndBB->empty() && elseEndBB->back().isTerminator() &&
+		                   elseEndBB->back().getSuccessor(0) == mergeBB;
 	}
 
 	builder.SetInsertPoint(mergeBB);
+
+	if (elseBB && thenReachesMerge && elseReachesMerge && thenVal && elseVal) {
+		llvm::Type* phiType = thenVal->getType();
+		llvm::Value* coercedElse = coerce(elseVal, phiType);
+		if (coercedElse && !phiType->isVoidTy()) {
+			auto* phi = builder.CreatePHI(phiType, 2, "yieldval");
+			phi->addIncoming(thenVal, thenEndBB);
+			phi->addIncoming(coercedElse, elseEndBB);
+			lastValue = phi;
+			return;
+		}
+	}
+
 	lastValue = nullptr;
 }
 
@@ -110,6 +135,15 @@ void CodeGenerator::visit(ContinueExpr&) {
 	builder.CreateBr(loopStack.back().continueBB);
 	startDeadBlock();
 }
+
+void CodeGenerator::visit(YieldExpr& node) {
+	if (!node.expr) {
+		lastValue = nullptr;
+		return;
+	}
+	lastValue = emit(node.expr.get());
+}
+
 
 void CodeGenerator::visit(ReturnExpr& node) {
 	if (!currentFn) { error("'return' outside of a function"); return; }
