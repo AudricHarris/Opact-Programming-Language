@@ -358,6 +358,8 @@ static inline TokenKind keywordOrIdent(std::string_view w) {
 				return TokenKind::BREAK;
 			if (w == "match")
 				return TokenKind::MATCH;
+			if (w == "yield")
+				return TokenKind::YIELD;
 			break;
 		case 6:
 			if (w == "return")

@@ -113,6 +113,9 @@ class Parser {
 		/**@brief Parses the return keyword to create a return expr it also has an expression after*/
 		ExprPtr parseReturn();
 
+		/**@brief Parses the yield keyword to create a yield expr it also has an expression after used for yielding values from if*/
+		ExprPtr parseYield();
+
 		/**@brief Check if the parsed elements is a var decl for references it's for parse expression that it's used*/
 		bool parseIsVarDeclRef();
 		/**@brief Check if the parsed elements is a var decl it's for parse expression that it's used*/

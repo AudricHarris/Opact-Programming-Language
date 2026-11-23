@@ -495,6 +495,7 @@ struct YieldExpr : Expression {
 	[[nodiscard]] ExprPtr clone() const override {
 		return std::make_unique<YieldExpr>(expr ? expr->clone() : nullptr);
 	}
+	[[nodiscard]] virtual bool requiresSemicolon() const override { return false; }
 };
 
 struct BreakExpr : Expression {

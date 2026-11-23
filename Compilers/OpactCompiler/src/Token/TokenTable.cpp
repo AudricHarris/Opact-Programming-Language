@@ -18,6 +18,8 @@ std::string Token::toString() {
 			return "FOR  ";
 		case TokenKind::RETURN:
 			return "RETURN	";
+		case TokenKind::YIELD:
+			return "YIELD	";
 		case TokenKind::AS:
 			return "AS	";
 		case TokenKind::FN:

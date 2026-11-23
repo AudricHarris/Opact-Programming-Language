@@ -22,6 +22,7 @@ enum class TokenKind {
 	LOOP,
 	FOR,
 	RETURN,
+	YIELD,
 	AS,
 	FN,
 	MUT,

@@ -579,6 +579,12 @@ ExprPtr Parser::parseExpression()
 	if (this->check(TokenKind::RETURN))
 		return this->parseReturn();
 
+	if (this->check(TokenKind::YIELD))
+		return this->parseYield();
+
+	if (this->check(TokenKind::IDENTIFIER))
+		return this->parseReturn();
+	
 	if (this->check(TokenKind::WHILE))
 		return this->parseWhile();
 
@@ -637,6 +643,15 @@ ExprPtr Parser::parseIf()
 	return makeNode<IfExpr>(tok, std::move(condition), std::move(ifBranch), std::move(elseBranch));
 }
 
+ExprPtr Parser::parseYield()
+{
+	Token tok = this->peek();
+	this->consume(); // consume TokenKind::RETURN
+
+	ExprPtr value = this->parseExpression();
+
+	return makeNode<YieldExpr>(tok, std::move(value));
+}
 //------------------------------//
 //-- Parsing While expression --//
 //------------------------------//
