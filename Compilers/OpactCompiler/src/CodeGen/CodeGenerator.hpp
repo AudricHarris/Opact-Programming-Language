@@ -42,6 +42,18 @@
 //==========================================================================//
 class CodeGenerator : public ASTVisitor {
 public:
+	struct EnumVariantInfo {
+		std::string name;
+		int tag = 0;
+		std::vector<llvm::Type*> payloadTypes;
+		std::vector<uint64_t> payloadOffsets;
+	};
+	struct EnumInfo {
+		llvm::StructType* storageType = nullptr;
+		uint64_t payloadBytes = 0;
+		std::vector<EnumVariantInfo> variants;
+	};
+
 	// A builtin receives the call node, emits IR itself, and returns the
 	// resulting value (nullptr for void / on error).
 	using BuiltinHandler = std::function<llvm::Value*(CallExpr&)>;
@@ -96,15 +108,15 @@ public:
 	void visit(ArrayIndexExpr& node) override;
 	void visit(ArrayLiteralExpr& node) override;
 	void visit(ArrayAllocExpr& node) override;
+	void visit(EnumDeclExpr& node) override;
+	void visit(EnumCreateExpr& node) override;
+	void visit(EnumGetExpr& node) override;
+	void visit(MatchExpr& node) override;
+	void visit(SwitchExpr& node) override;
 
 	// Not implemented yet
 	void visit(GenericCallExpr&) override {}
 	void visit(TupleLiteralExpr&) override {}
-	void visit(EnumDeclExpr& node) override {}
-	void visit(EnumCreateExpr& node) override {}
-	void visit(EnumGetExpr& node) override {}
-	void visit(MatchExpr& node) override {}
-	void visit(SwitchExpr& node) override {}
 
 private:
 	//----------------------------------------------------------------------//
@@ -118,6 +130,7 @@ private:
 		bool isUnsigned = false;
 		llvm::Value* ownedSlot = nullptr; // heap slot currently owned by this variable
 	};
+
 
 	struct LoopTargets { llvm::BasicBlock* breakBB; llvm::BasicBlock* continueBB; };
 	struct StructInfo {
@@ -196,6 +209,8 @@ private:
 	bool blockTerminated();
 	void branchIfOpen(llvm::BasicBlock* target);
 	void startDeadBlock();
+	const EnumInfo* findEnumStorageType(llvm::Type* ty) const;
+	llvm::Value* emitEnumComparison(BinaryOp op, llvm::Value* lhs, llvm::Value* rhs);
 	llvm::AllocaInst* createEntryAlloca(llvm::Function* fn, llvm::Type* ty, const std::string& name);
 
 	llvm::Function* declareFunction(FunctionDeclExpr& node);
@@ -205,6 +220,7 @@ private:
 	static std::string tokenText(const Token& t) { return t.getWord(); }
 	llvm::Type* getExprType(Expression* e);
 
+	const EnumVariantInfo* findEnumVariant(const EnumInfo& einfo, const std::string& variantName) const;
 	//----------------------------------------------------------------------//
 	//  State                                                               //
 	//----------------------------------------------------------------------//
@@ -220,6 +236,7 @@ private:
 	std::vector<std::unordered_map<std::string, VarInfo>> scopes;
 	std::vector<LoopTargets> loopStack;
 	std::unordered_map<std::string, BuiltinHandler> builtins;
+	std::unordered_map<std::string, EnumInfo> enums;
 	std::unordered_map<std::string, StructInfo> structs;
 };
 

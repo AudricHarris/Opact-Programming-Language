@@ -31,11 +31,13 @@ llvm::Type* CodeGenerator::mapType(const TypeDesc& d) {
 		case DataType::Str:   base = builder.getPtrTy();     break;
 		case DataType::Void:  base = builder.getVoidTy();    break;
 		case DataType::Custom: {
-			auto it = structs.find(d.customTypeName);
-			if (it != structs.end()) { base = it->second.type; break; }
-			error("Unknown type '" + d.customTypeName + "'");
-			return nullptr;
-		}
+								   auto it = structs.find(d.customTypeName);
+								   if (it != structs.end()) { base = it->second.type; break; }
+								   auto eit = enums.find(d.customTypeName);
+								   if (eit != enums.end()) { base = eit->second.storageType; break; }
+								   error("Unknown type '" + d.customTypeName + "'");
+								   return nullptr;
+							   }
 	}
 	if (!base) return nullptr;
 

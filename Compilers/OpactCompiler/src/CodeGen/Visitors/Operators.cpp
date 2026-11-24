@@ -186,6 +186,14 @@ void CodeGenerator::visit(BinaryExpr& node) {
 	llvm::Value* l = emit(node.left.get());
 	llvm::Value* r = emit(node.right.get());
 	bool isUnsigned = isUnsignedExpr(node.left.get()) || isUnsignedExpr(node.right.get());
+
+	if ((node.op == BinaryOp::Eq || node.op == BinaryOp::Ne) && l && r) {
+		if (findEnumStorageType(l->getType()) || findEnumStorageType(r->getType())) {
+			lastValue = emitEnumComparison(node.op, l, r);
+			return;
+		}
+	}
+
 	lastValue = (l && r) ? emitBinary(node.op, l, r, isUnsigned) : nullptr;
 }
 

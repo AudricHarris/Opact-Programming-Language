@@ -14,6 +14,68 @@ using namespace codegen_detail;
 
 void CodeGenerator::visit(CallExpr& node) {
 	lastValue = nullptr;
+
+	if (auto* enumGet = dynamic_cast<EnumGetExpr*>(node.callee.get())) {
+		if (!currentFn) {
+			error("Enum variant call outside of a function");
+			return;
+		}
+		if (auto* targetId = dynamic_cast<IdentifierExpr*>(enumGet->target.get())) {
+			auto eit = enums.find(targetId->name);
+			if (eit != enums.end() && eit->second.storageType) {
+				const EnumInfo& einfo = eit->second;
+				const EnumVariantInfo* vinfo = findEnumVariant(einfo, enumGet->fieldName);
+				if (!vinfo) {
+					error("Unknown variant '" + enumGet->fieldName + "' for enum '" + targetId->name + "'");
+					return;
+				}
+				if (vinfo->payloadTypes.size() != node.arguments.size()) {
+					error("Variant '" + targetId->name + "::" + enumGet->fieldName + "' expects " +
+							std::to_string(vinfo->payloadTypes.size()) + " argument(s), got " +
+							std::to_string(node.arguments.size()));
+					return;
+				}
+
+				llvm::AllocaInst* enumAlloca = createEntryAlloca(
+						currentFn, einfo.storageType, targetId->name + "_tmp");
+				builder.CreateStore(llvm::Constant::getNullValue(einfo.storageType), enumAlloca);
+
+				llvm::Value* tagPtr = builder.CreateStructGEP(
+						einfo.storageType, enumAlloca, 0, "enum_tag_ptr");
+				builder.CreateStore(builder.getInt32(vinfo->tag), tagPtr);
+
+				if (!node.arguments.empty()) {
+					llvm::Value* payloadArrPtr = builder.CreateStructGEP(
+							einfo.storageType, enumAlloca, 1, "enum_payload_ptr");
+					llvm::Type* payloadArrTy = llvm::ArrayType::get(builder.getInt8Ty(), einfo.payloadBytes);
+
+					for (size_t i = 0; i < node.arguments.size(); ++i) {
+						if (!node.arguments[i]) continue;
+						llvm::Value* argVal = emit(node.arguments[i].get());
+						if (!argVal) return;
+
+						llvm::Type* targetTy = vinfo->payloadTypes[i];
+						if ((targetTy->isStructTy() || targetTy->isArrayTy()) && argVal->getType()->isPointerTy()) {
+							argVal = builder.CreateLoad(targetTy, argVal, "enum_arg_load");
+						}
+						argVal = coerce(argVal, targetTy);
+						if (!argVal) return;
+
+						llvm::Value* bytePtr = builder.CreateConstGEP2_64(
+								payloadArrTy, payloadArrPtr, 0, vinfo->payloadOffsets[i],
+								"payload_off_" + std::to_string(i));
+						llvm::Value* typedPtr = builder.CreatePointerCast(
+								bytePtr, builder.getPtrTy(), "payload_typed_ptr");
+						builder.CreateStore(argVal, typedPtr);
+					}
+				}
+
+				lastValue = enumAlloca;
+				return;
+			}
+		}
+	}
+
 	auto* id = dynamic_cast<IdentifierExpr*>(node.callee.get());
 	if (!id) { error("Only direct calls by name are supported"); return; }
 

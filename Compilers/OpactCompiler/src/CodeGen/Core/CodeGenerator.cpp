@@ -52,3 +52,4 @@ CodeGenerator::VarInfo* CodeGenerator::lookupVar(const std::string& name) {
 	}
 	return nullptr;
 }
+
