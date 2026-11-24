@@ -346,6 +346,8 @@ static inline TokenKind keywordOrIdent(std::string_view w) {
 				return TokenKind::LOOP;
 			if (w == "enum")
 				return TokenKind::ENUM;
+			if (w == "case")
+				return TokenKind::CASE;
 			break;
 		case 5:
 			if (w == "while")
@@ -370,6 +372,8 @@ static inline TokenKind keywordOrIdent(std::string_view w) {
 				return TokenKind::PUBLIC;
 			if (w == "struct")
 				return TokenKind::STRUCT;
+			if (w == "switch")
+				return TokenKind::SWITCH;
 			break;
 		case 7:
 			if (w == "private")

@@ -100,6 +100,11 @@ public:
 	// Not implemented yet
 	void visit(GenericCallExpr&) override {}
 	void visit(TupleLiteralExpr&) override {}
+	void visit(EnumDeclExpr& node) override {}
+	void visit(EnumCreateExpr& node) override {}
+	void visit(EnumGetExpr& node) override {}
+	void visit(MatchExpr& node) override {}
+	void visit(SwitchExpr& node) override {}
 
 private:
 	//----------------------------------------------------------------------//

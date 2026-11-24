@@ -82,6 +82,15 @@ class Parser {
 		ExprPtr parseImport();
 		/** @brief Parse structure decl with attributes */
 		ExprPtr parseStruct(std::optional<Token> visib);
+
+		/** @brief Parse enum decl with fields */
+		ExprPtr parseEnum(std::optional<Token> visib);
+
+		/** @brief Parse switche for value */
+		ExprPtr parseSwitch();
+		/** @brief Parse matches for enum */
+		ExprPtr parseMatch();
+
 		/** @brief Parse function decl with params and returns things */
 		ExprPtr parseFunction(std::optional<Token> visib);
 		/** @brief Parses block so this is {[expressions]} so just a list of expressions */
@@ -96,7 +105,7 @@ class Parser {
 		ExprPtr parseFor();
 		/** @brief parses loop (initially a while true might become a loop until) and then block*/
 		ExprPtr parseLoop();
-		
+
 		/**
 		 * @brief Parses postfix operators, indexing, member access, function calls, 
 		 *		  and type casts in a left-to-right chain.

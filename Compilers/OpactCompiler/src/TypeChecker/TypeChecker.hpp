@@ -60,6 +60,12 @@ public:
 	void visit(TupleLiteralExpr& node) override {}
 	void visit(BreakExpr& node) override {}
 	void visit(ContinueExpr& node) override {}
+	void visit(EnumDeclExpr& node) override {}
+	void visit(EnumCreateExpr& node) override {}
+	void visit(EnumGetExpr& node) override {}
+	void visit(MatchExpr& node) override {}
+	void visit(SwitchExpr& node) override {}
+
 
 private:
 	struct LocalInfo {

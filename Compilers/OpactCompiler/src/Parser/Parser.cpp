@@ -165,6 +165,11 @@ ExprPtr Parser::parseTopLevel()
 		return this->parseStruct(visibility); 
 	}
 
+	if (this->check(TokenKind::ENUM))
+	{
+		return this->parseEnum(visibility);
+	}
+
 	this->consume();
 	return nullptr;
 }
@@ -329,6 +334,264 @@ ExprPtr Parser::parseStruct(std::optional<Token> visib)
 	while (!this->match(TokenKind::RBRACE));
 
 	return makeNode<StructDeclExpr>(nameTok, std::move(name), std::move(fields), isPublic);
+}
+
+//-------------------//
+//-- Parsing Enums --//
+//-------------------//
+
+ExprPtr Parser::parseEnum(std::optional<Token> visib)
+{
+	this->consume(); // TokenKind::ENUM
+
+	bool isPublic = visib.has_value() && visib->getKind() == TokenKind::PUBLIC;
+
+	Token nameTok = this->expect(TokenKind::IDENTIFIER, "Expected identifier as enum name");
+	std::string name = nameTok.getWord();
+
+	this->expect(TokenKind::LBRACE, "Expected '{' for opening enum body");
+
+	std::vector<EnumField> fields;
+	int nextAutoValue = 0;
+
+	if (!this->check(TokenKind::RBRACE))
+	{
+		do {
+			if (this->check(TokenKind::RBRACE)) // Virgule finale optionnelle
+				break;
+
+			Token variantTok = this->expect(TokenKind::IDENTIFIER, "Expected enum variant name");
+			std::string variantName = variantTok.getWord();
+
+			std::vector<StructureField> attributes;
+
+			// Payload optionnel : ex. IsHuman(i32 test, str name)
+			if (this->match(TokenKind::LPAREN))
+			{
+				if (!this->check(TokenKind::RPAREN))
+				{
+					do {
+						if (this->check(TokenKind::RPAREN))
+							break;
+
+						bool isMut = false, isRef = false;
+						if (this->check(TokenKind::AND))
+						{
+							isRef = true;
+							this->consume();
+							if (this->check(TokenKind::MUT))
+							{
+								isMut = true;
+								this->consume();
+							}
+						}
+
+						Token attrTypeTok = this->expect(TokenKind::IDENTIFIER, "Expected type for enum variant field");
+						TypeDesc attrType;
+						attrType.type = determineType(attrTypeTok);
+						attrType.customTypeName = attrTypeTok.getWord();
+						attrType.isReference = isRef;
+						attrType.isMutable = isMut;
+
+						while (this->match(TokenKind::LBRACKET))
+						{
+							if (this->match(TokenKind::QUESTION))
+							{
+								attrType.dim.push_back(UNKNOWN_DIM);
+							}
+							else
+							{
+								Token sizeTok = this->expect(TokenKind::LIT_INT, "Expected integer dimension size or '?' inside brackets []");
+								attrType.dim.push_back(std::stoi(sizeTok.getWord()));
+							}
+							this->expect(TokenKind::RBRACKET, "Expected closing ']' after array size");
+						}
+
+						// Nom du champ optionnel (ex: IsHuman(i32 test) ou IsHuman(i32))
+						std::string attrName;
+						if (this->check(TokenKind::IDENTIFIER))
+						{
+							attrName = this->consume().getWord();
+						}
+
+						attributes.emplace_back(std::move(attrName), std::move(attrType), isRef, isMut, std::nullopt);
+					} while (this->match(TokenKind::COMMA));
+				}
+				this->expect(TokenKind::RPAREN, "Expected ')' after enum variant fields");
+			}
+
+			// Valeur discriminante explicite optionnelle : ex. Error = 3
+			int variantValue = nextAutoValue;
+			if (this->match(TokenKind::ASSIGN))
+			{
+				bool isNeg = this->match(TokenKind::SUB);
+				Token valTok = this->expect(TokenKind::LIT_INT, "Expected integer value after '=' in enum variant");
+				variantValue = std::stoi(valTok.getWord());
+				if (isNeg) variantValue = -variantValue;
+			}
+			nextAutoValue = variantValue + 1;
+
+			fields.emplace_back(std::move(variantName), std::move(attributes), variantValue);
+
+			// Supporte ';' ou ',' comme séparateur de variantes
+			if (!this->match(TokenKind::COMMA))
+			{
+				this->match(TokenKind::SEMI);
+			}
+		} while (!this->check(TokenKind::RBRACE) && !this->isAtEnd());
+	}
+
+	this->expect(TokenKind::RBRACE, "Expected '}' at end of enum body");
+	this->match(TokenKind::SEMI); // ';' optionnel après '}'
+
+	auto node = makeNode<EnumDeclExpr>(nameTok, std::move(name), std::move(fields), isPublic);
+	return node;
+}
+
+ExprPtr Parser::parseSwitch()
+{
+	Token tok = this->peek();
+	this->expect(TokenKind::SWITCH, "Expected 'switch' at the start of a switch expression");
+	this->expect(TokenKind::LPAREN, "Expected '(' after 'switch'");
+	ExprPtr scrutinee = this->parseExpression();
+	this->expect(TokenKind::RPAREN, "Expected ')' after switch expression");
+
+	this->expect(TokenKind::LBRACE, "Expected '{' for opening switch body");
+
+	std::vector<SwitchCase> cases;
+
+	while (!this->check(TokenKind::RBRACE) && !this->isAtEnd())
+	{
+		bool isWildcard = false;
+		std::vector<ExprPtr> labels;
+
+		// Wildcard '_' (option A choisi ensemble)
+		if (this->check(TokenKind::IDENTIFIER) && this->peek().getWord() == "_")
+		{
+			Token wildTok = this->consume();
+			isWildcard = true;
+			labels.push_back(makeNode<IdentifierExpr>(wildTok, "_"));
+			this->expect(TokenKind::COLON, "Expected ':' after '_' in switch");
+		}
+		else
+		{
+			this->expect(TokenKind::CASE, "Expected 'case' or '_' inside switch");
+			do {
+				labels.push_back(this->parseExpression());
+			} while (this->match(TokenKind::COMMA)); // Supporte case 1, 2:
+			this->expect(TokenKind::COLON, "Expected ':' after case label");
+		}
+
+		ExprPtr body;
+		if (this->check(TokenKind::LBRACE))
+		{
+			body = this->parseBlock();
+		}
+		else
+		{
+			body = this->parseExpression();
+			if (body && body->requiresSemicolon() && !this->check(TokenKind::RBRACE))
+			{
+				this->expect(TokenKind::SEMI, "Expected ';' after switch branch");
+			}
+		}
+
+		cases.emplace_back(isWildcard, std::move(labels), std::move(body));
+	}
+
+	this->expect(TokenKind::RBRACE, "Expected '}' at end of switch body");
+
+	return makeNode<SwitchExpr>(tok, std::move(scrutinee), std::move(cases));
+}
+
+ExprPtr Parser::parseMatch()
+{
+	Token tok = this->peek();
+	this->expect(TokenKind::MATCH, "Expected 'match' at the start of a match expression");
+
+	bool hasParens = this->match(TokenKind::LPAREN);
+	ExprPtr scrutinee = this->parseExpression();
+	if (hasParens)
+	{
+		this->expect(TokenKind::RPAREN, "Expected ')' after match expression");
+	}
+
+	this->expect(TokenKind::LBRACE, "Expected '{' for opening match body");
+
+	std::vector<MatchArm> arms;
+
+	while (!this->check(TokenKind::RBRACE) && !this->isAtEnd())
+	{
+		MatchPattern pattern = MatchPattern::wildcard();
+
+		// 1. Wildcard '_'
+		if (this->check(TokenKind::IDENTIFIER) && this->peek().getWord() == "_")
+		{
+			this->consume();
+			pattern = MatchPattern::wildcard();
+		}
+		else
+		{
+			// 2. Motif de variante : Error, Test::Error, IsHuman(test), Test::IsHuman(test, _)
+			Token firstIdent = this->expect(TokenKind::IDENTIFIER, "Expected variant pattern or '_' in match arm");
+			std::optional<std::string> enumName = std::nullopt;
+			std::string variantName = firstIdent.getWord();
+
+			if (this->match(TokenKind::COLON_COLON))
+			{
+				enumName = variantName;
+				variantName = this->expect(TokenKind::IDENTIFIER, "Expected variant name after '::'").getWord();
+			}
+
+			std::vector<std::string> bindings;
+			if (this->match(TokenKind::LPAREN))
+			{
+				if (!this->check(TokenKind::RPAREN))
+				{
+					do {
+						if (this->check(TokenKind::RPAREN))
+							break;
+						Token bindTok = this->expect(TokenKind::IDENTIFIER, "Expected binding name or '_' in variant pattern");
+						bindings.push_back(bindTok.getWord());
+					} while (this->match(TokenKind::COMMA));
+				}
+				this->expect(TokenKind::RPAREN, "Expected ')' after pattern bindings");
+			}
+
+			pattern = MatchPattern::variant(std::move(variantName), std::move(bindings), std::move(enumName));
+		}
+
+		// Garde optionnelle : ex. IsHuman(age) if age >= 18 => ...
+		std::optional<ExprPtr> guard = std::nullopt;
+		if (this->match(TokenKind::IF))
+		{
+			guard = this->parseExpression();
+		}
+
+		this->expect(TokenKind::FAT_ARROW, "Expected '=>' after match pattern");
+
+		ExprPtr armBody;
+		if (this->check(TokenKind::LBRACE))
+		{
+			armBody = this->parseBlock();
+		}
+		else
+		{
+			armBody = this->parseExpression();
+			if (armBody && armBody->requiresSemicolon() && !this->check(TokenKind::RBRACE))
+			{
+				this->match(TokenKind::SEMI);
+			}
+		}
+
+		this->match(TokenKind::COMMA); // Virgule optionnelle entre les bras
+
+		arms.emplace_back(std::move(pattern), std::move(armBody), std::move(guard));
+	}
+
+	this->expect(TokenKind::RBRACE, "Expected '}' at end of match body");
+
+	return makeNode<MatchExpr>(tok, std::move(scrutinee), std::move(arms));
 }
 
 //----------------------//
@@ -609,6 +872,12 @@ ExprPtr Parser::parseExpression()
 			return this->parseVarDecl();
 		return this->parseBorrow();
 	}
+	
+	if (this->check(TokenKind::SWITCH))
+		return this->parseSwitch();
+
+	if (this->check(TokenKind::MATCH))
+		return this->parseMatch();
 
 	if (this->parseIsVarDecl()) {
 		return this->parseVarDecl();

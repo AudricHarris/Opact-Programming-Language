@@ -287,6 +287,227 @@ struct StructDeclExpr : Expression {
 	}
 };
 
+//----------------------//
+//-- Enum & Matching  --//
+//----------------------//
+
+struct EnumField {
+	std::string name;
+	std::vector<StructureField> attributes; // Empty for unit variants like Error
+	std::optional<int> explicitValue;       // e.g. 0, 1, 3; resolved to tag during sema
+
+	EnumField(std::string name, std::vector<StructureField> attributes = {}, std::optional<int> explicitValue = std::nullopt)
+		: name(std::move(name)), attributes(std::move(attributes)), explicitValue(explicitValue) {}
+
+	// Move-only because StructureField contains unique_ptr (in defaultVal)
+	EnumField(const EnumField&) = delete;
+	EnumField& operator=(const EnumField&) = delete;
+	EnumField(EnumField&&) noexcept = default;
+	EnumField& operator=(EnumField&&) noexcept = default;
+
+	[[nodiscard]] EnumField clone() const {
+		std::vector<StructureField> clonedAttrs;
+		clonedAttrs.reserve(attributes.size());
+		for (const auto& attr : attributes) {
+			clonedAttrs.push_back(attr.clone());
+		}
+		return EnumField(name, std::move(clonedAttrs), explicitValue);
+	}
+};
+
+struct EnumDeclExpr : Expression {
+	std::string name;
+	std::vector<EnumField> fields;
+	bool isPublic = false;
+
+	EnumDeclExpr(std::string name = "", std::vector<EnumField> fields = {}, bool isPublic = false)
+		: name(std::move(name)), fields(std::move(fields)), isPublic(isPublic) {}
+
+	void accept(ASTVisitor& visitor) override;
+
+	[[nodiscard]] ExprPtr clone() const override {
+		std::vector<EnumField> clonedFields;
+		clonedFields.reserve(fields.size());
+		for (const auto& f : fields) {
+			clonedFields.push_back(f.clone());
+		}
+		auto copy = std::make_unique<EnumDeclExpr>(name, std::move(clonedFields), isPublic);
+		copy->line = line;
+		copy->col = col;
+		return copy;
+	}
+
+	[[nodiscard]] bool requiresSemicolon() const override { return false; }
+};
+
+// Constructing a variant: e.g. Test::Error or Test::IsHuman(123)
+struct EnumCreateExpr : Expression {
+	std::string enumName;       // e.g. "Test" (or ExprPtr if qualified/path-based)
+	std::string variantName;    // e.g. "Error" or "IsHuman"
+	std::vector<ExprPtr> args;  // Payload arguments (empty for unit variants)
+
+	EnumCreateExpr(std::string enumName, std::string variantName, std::vector<ExprPtr> args = {})
+		: enumName(std::move(enumName)), variantName(std::move(variantName)), args(std::move(args)) {}
+
+	void accept(ASTVisitor& visitor) override;
+
+	[[nodiscard]] ExprPtr clone() const override {
+		auto copy = std::make_unique<EnumCreateExpr>(enumName, variantName, cloneVector(args));
+		copy->line = line;
+		copy->col = col;
+		return copy;
+	}
+};
+
+enum class EnumGetKind { NamedField, PositionalField };
+
+struct EnumGetExpr : Expression {
+	ExprPtr target;
+	EnumGetKind kind = EnumGetKind::PositionalField;
+	std::string fieldName;
+	size_t fieldIndex = 0;
+	std::optional<std::string> expectedVariant;
+
+	EnumGetExpr(ExprPtr target, std::string fieldName, std::optional<std::string> expectedVariant = std::nullopt)
+		: target(std::move(target)),
+		  kind(EnumGetKind::NamedField),
+		  fieldName(std::move(fieldName)),
+		  expectedVariant(std::move(expectedVariant)) {}
+
+	EnumGetExpr(ExprPtr target, size_t fieldIndex, std::optional<std::string> expectedVariant = std::nullopt)
+		: target(std::move(target)),
+		  kind(EnumGetKind::PositionalField),
+		  fieldIndex(fieldIndex),
+		  expectedVariant(std::move(expectedVariant)) {}
+
+	void accept(ASTVisitor& visitor) override;
+
+	[[nodiscard]] ExprPtr clone() const override {
+		auto copy = (kind == EnumGetKind::NamedField)
+			? std::make_unique<EnumGetExpr>(target ? target->clone() : nullptr, fieldName, expectedVariant)
+			: std::make_unique<EnumGetExpr>(target ? target->clone() : nullptr, fieldIndex, expectedVariant);
+		copy->line = line;
+		copy->col = col;
+		return copy;
+	}
+};
+
+// Pattern inside a match arm:
+//   - Wildcard: `_`
+//   - Variant pattern: `Error` or `IsHuman(test)` or `IsHuman(_)`
+struct MatchPattern {
+	enum class Kind { Wildcard, Variant };
+
+	Kind kind = Kind::Wildcard;
+	std::optional<std::string> enumName;
+	std::string variantName;
+	std::vector<std::string> bindingNames;
+
+	static MatchPattern wildcard() {
+		MatchPattern p;
+		p.kind = Kind::Wildcard;
+		return p;
+	}
+
+	static MatchPattern variant(std::string variantName, std::vector<std::string> bindingNames = {}, std::optional<std::string> enumName = std::nullopt) {
+		MatchPattern p;
+		p.kind = Kind::Variant;
+		p.enumName = std::move(enumName);
+		p.variantName = std::move(variantName);
+		p.bindingNames = std::move(bindingNames);
+		return p;
+	}
+
+	[[nodiscard]] MatchPattern clone() const {
+		return MatchPattern{kind, enumName, variantName, bindingNames};
+	}
+};
+
+struct MatchArm {
+	MatchPattern pattern;
+	std::optional<ExprPtr> guard;
+	ExprPtr body;
+
+	MatchArm(MatchPattern pattern, ExprPtr body, std::optional<ExprPtr> guard = std::nullopt)
+		: pattern(std::move(pattern)), guard(std::move(guard)), body(std::move(body)) {}
+
+	MatchArm(const MatchArm&) = delete;
+	MatchArm& operator=(const MatchArm&) = delete;
+	MatchArm(MatchArm&&) noexcept = default;
+	MatchArm& operator=(MatchArm&&) noexcept = default;
+
+	[[nodiscard]] MatchArm clone() const {
+		return MatchArm(pattern.clone(), body ? body->clone() : nullptr, cloneOptional(guard));
+	}
+};
+
+struct MatchExpr : Expression {
+	ExprPtr scrutinee;          // Expression being matched, e.g. `t`
+	std::vector<MatchArm> arms;
+
+	MatchExpr(ExprPtr scrutinee = nullptr, std::vector<MatchArm> arms = {})
+		: scrutinee(std::move(scrutinee)), arms(std::move(arms)) {}
+
+	void accept(ASTVisitor& visitor) override;
+
+	[[nodiscard]] ExprPtr clone() const override {
+		std::vector<MatchArm> clonedArms;
+		clonedArms.reserve(arms.size());
+		for (const auto& arm : arms) {
+			clonedArms.push_back(arm.clone());
+		}
+		auto copy = std::make_unique<MatchExpr>(scrutinee ? scrutinee->clone() : nullptr, std::move(clonedArms));
+		copy->line = line;
+		copy->col = col;
+		return copy;
+	}
+
+	[[nodiscard]] bool requiresSemicolon() const override { return false; }
+};
+
+// Switch for flat values (ints, chars, strings, tagless enums) with `_` catch-all
+struct SwitchCase {
+	bool isWildcard = false;
+	std::vector<ExprPtr> labels;
+	ExprPtr body;
+
+	SwitchCase(bool isWildcard, std::vector<ExprPtr> labels, ExprPtr body)
+		: isWildcard(isWildcard), labels(std::move(labels)), body(std::move(body)) {}
+
+	SwitchCase(const SwitchCase&) = delete;
+	SwitchCase& operator=(const SwitchCase&) = delete;
+	SwitchCase(SwitchCase&&) noexcept = default;
+	SwitchCase& operator=(SwitchCase&&) noexcept = default;
+
+	[[nodiscard]] SwitchCase clone() const {
+		return SwitchCase(isWildcard, cloneVector(labels), body ? body->clone() : nullptr);
+	}
+};
+
+struct SwitchExpr : Expression {
+	ExprPtr value;
+	std::vector<SwitchCase> cases;
+
+	SwitchExpr(ExprPtr value = nullptr, std::vector<SwitchCase> cases = {})
+		: value(std::move(value)), cases(std::move(cases)) {}
+
+	void accept(ASTVisitor& visitor) override;
+
+	[[nodiscard]] ExprPtr clone() const override {
+		std::vector<SwitchCase> clonedCases;
+		clonedCases.reserve(cases.size());
+		for (const auto& c : cases) {
+			clonedCases.push_back(c.clone());
+		}
+		auto copy = std::make_unique<SwitchExpr>(value ? value->clone() : nullptr, std::move(clonedCases));
+		copy->line = line;
+		copy->col = col;
+		return copy;
+	}
+
+	[[nodiscard]] bool requiresSemicolon() const override { return false; }
+};
+
 //-------------------------------//
 //-- Control Flow & Statements --//
 //-------------------------------//
@@ -638,6 +859,11 @@ struct ASTVisitor {
 	virtual void visit(ContinueExpr& node) = 0;
 	virtual void visit(ImportExpr& node) = 0;
 	virtual void visit(FunctionDeclExpr& node) = 0;
+	virtual void visit(EnumDeclExpr& node) = 0;
+	virtual void visit(EnumCreateExpr& node) = 0;
+	virtual void visit(EnumGetExpr& node) = 0;
+	virtual void visit(MatchExpr& node) = 0;
+	virtual void visit(SwitchExpr& node) = 0;
 };
 
 //-------------------------------------------//
@@ -673,5 +899,10 @@ inline void ReturnExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void ContinueExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void ImportExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 inline void FunctionDeclExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+inline void EnumDeclExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+inline void EnumCreateExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+inline void EnumGetExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+inline void MatchExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+inline void SwitchExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 
 #endif // AST_HPP

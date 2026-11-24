@@ -46,6 +46,10 @@ std::string Token::toString() {
 			return "ENUM  ";
 		case TokenKind::MATCH:
 			return "MATCH  ";
+		case TokenKind::SWITCH:
+			return "SWITCH  ";
+		case TokenKind::CASE:
+			return "CASE  ";
 		case TokenKind::LIT_INT:
 			return "LIT_INT  ";
 		case TokenKind::LIT_FLOAT:

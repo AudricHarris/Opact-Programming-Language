@@ -36,6 +36,8 @@ enum class TokenKind {
 	STRUCT,
 	ENUM,
 	MATCH,
+	SWITCH,
+	CASE,
 
 	// Literals
 	LIT_INT,
