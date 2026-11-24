@@ -819,10 +819,12 @@ ExprPtr Parser::parseBlock()
 		try {
 			ExprPtr expr = this->parseExpression();
 			bool isYield = dynamic_cast<YieldExpr*>(expr.get()) != nullptr;
+			bool requiresSemi = (expr != nullptr) ? expr->requiresSemicolon() : false;
+
 			if (expr != nullptr)
 				expressions.push_back(std::move(expr));
 
-			if (!isYield && !this->check(TokenKind::SEMI)) {
+			if (!isYield && requiresSemi) {
 				this->expect(TokenKind::SEMI, "Expected ';' after statement");
 			}
 		} catch (const std::exception& e) {
@@ -1330,6 +1332,20 @@ ExprPtr Parser::parsePostfix(ExprPtr expr)
 			}
 			this->expect(TokenKind::RBRACE, "Expected '}' after structure arguments");
 			expr = std::make_unique<StructCreateExpr>(std::move(expr), std::move(args));
+			continue;
+		}
+
+		if (this->match(TokenKind::COLON_COLON)) {
+			Token variantTok = this->expect(TokenKind::IDENTIFIER, "Expected variant or member name after '::'");
+
+			// Optional: if variants can take payload values like Result::Ok(x)
+			if (this->match(TokenKind::LPAREN)) {
+				ExprPtr scopeExpr = makeNode<EnumGetExpr>(variantTok, std::move(expr), variantTok.getWord());
+				expr = this->parseCallExpr(std::move(scopeExpr));
+				continue;
+			}
+
+			expr = makeNode<EnumGetExpr>(variantTok, std::move(expr), variantTok.getWord());
 			continue;
 		}
 

@@ -3,6 +3,7 @@
 #include <fstream>
 #include "../Parser/Ast.hpp"
 #include "Scope/ScopeManager.hpp"
+#include "Types/EnumType.hpp"
 #include "Types/Type.hpp"
 #include "Types/FunctionType.hpp"
 #include "Types/StructType.hpp"
@@ -54,17 +55,17 @@ public:
 	void visit(ArrayIndexExpr& node) override;
 	void visit(ArrayAllocExpr& node) override;
 	void visit(YieldExpr& node) override;
+	void visit(BreakExpr& node) override;
+	void visit(ContinueExpr& node) override;
+	void visit(EnumDeclExpr& node) override;
+	void visit(EnumCreateExpr& node) override;
+	void visit(EnumGetExpr& node) override;
+	void visit(MatchExpr& node) override;
+	void visit(SwitchExpr& node) override;
 
 	// Stub out remaining ASTVisitor pure virtuals...
 	void visit(GenericCallExpr& node) override {}
 	void visit(TupleLiteralExpr& node) override {}
-	void visit(BreakExpr& node) override {}
-	void visit(ContinueExpr& node) override {}
-	void visit(EnumDeclExpr& node) override {}
-	void visit(EnumCreateExpr& node) override {}
-	void visit(EnumGetExpr& node) override {}
-	void visit(MatchExpr& node) override {}
-	void visit(SwitchExpr& node) override {}
 
 
 private:
@@ -78,6 +79,7 @@ private:
 	std::shared_ptr<Type> currentReturnType;
 	std::unordered_set<const FunctionDeclExpr*> declaredFunctions_;
 	std::unordered_set<const StructDeclExpr*> declaredStructures_;
+	std::unordered_set<const EnumDeclExpr*> declaredEnums_;
 	std::unordered_map<const void*, LocalInfo> localInfo_;
 	std::vector<FunctionDeclExpr> persistentBuiltins_;
 	int errorCount_ = 0;
@@ -95,6 +97,8 @@ private:
 	std::shared_ptr<StructType> buildStructureType(const StructDeclExpr& structure);
 	void declareFunction(const FunctionDeclExpr& fn);
 	void declareStructures(const StructDeclExpr& structure);
+	std::shared_ptr<EnumType> buildEnumType(const EnumDeclExpr& enumDecl);
+	void declareEnum(const EnumDeclExpr& enumDecl);
 
 	void checkNoNegativeConst(Expression& e, const std::string& what);
 	bool isUnsignedField(const std::string& structName, const std::string& field) const;

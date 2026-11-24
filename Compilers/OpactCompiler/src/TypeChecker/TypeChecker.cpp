@@ -2,6 +2,7 @@
 #include "../Parser/Ast.hpp"
 #include "../Parser/CompilerPipeline.hpp"
 #include "../Parser/RangeUtil.hpp"
+#include "Symbol/EnumSymbol.hpp"
 #include "Symbol/FunctionSymbol.hpp"
 #include "Symbol/StructSymbol.hpp"
 #include "Symbol/VarSymbol.hpp"
@@ -121,6 +122,15 @@ namespace {
 		}
 		return false;
 	}
+
+	int resolveExplicitValue(int v, int fallback) {
+		(void)v;
+		return fallback;
+	}
+
+	int resolveExplicitValue(const std::optional<int>& v, int fallback) {
+		return v.value_or(fallback);
+	}
 } // namespace
 
 TypeChecker::TypeChecker(CompilerPipeline* pipeline, const std::string& filePath)
@@ -210,6 +220,43 @@ void TypeChecker::reportError(size_t line, size_t col, const std::string& primar
 
 void TypeChecker::reportError(const std::string& message) {
 	reportError(0, 0, message, "");
+}
+
+std::shared_ptr<EnumType> TypeChecker::buildEnumType(const EnumDeclExpr& enumDecl) {
+	auto enumTy = std::make_shared<EnumType>(enumDecl.name);
+	size_t maxPayloadSize = 0;
+	int nextTag = 0;
+
+	for (const auto& field : enumDecl.fields) {
+		std::vector<StructField> payload;
+		size_t offset = 0;
+
+		for (size_t i = 0; i < field.attributes.size(); ++i) {
+			const auto& attr = field.attributes[i];
+			std::shared_ptr<Type> attrType = fromDesc(attr.type);
+			std::string attrName = attr.name.empty() ? ("_" + std::to_string(i)) : attr.name;
+			payload.push_back(StructField{attrName, attrType, offset});
+			offset += attrType->getSize();
+		}
+
+		if (offset > maxPayloadSize) maxPayloadSize = offset;
+
+		int tag = resolveExplicitValue(field.explicitValue, nextTag);
+		nextTag = tag + 1;
+
+		enumTy->addVariant(field.name, tag, std::move(payload));
+	}
+
+	enumTy->setSize(prim(BuiltinType::Int)->getSize() + maxPayloadSize);
+	return enumTy;
+}
+
+void TypeChecker::declareEnum(const EnumDeclExpr& enumDecl) {
+	auto sym = std::make_shared<EnumSymbol>(enumDecl.name, buildEnumType(enumDecl));
+	if (!scopeManager.declare(enumDecl.name, sym)) {
+		reportError(enumDecl.line, enumDecl.col, "Redeclaration of enum: " + enumDecl.name);
+	}
+	declaredEnums_.insert(&enumDecl);
 }
 
 // Rejects negative integer constants, descending into (nested) array literals.
@@ -311,7 +358,7 @@ std::shared_ptr<Type> TypeChecker::fromDesc(const TypeDesc& d) {
 			if (name.empty() && d.customName) name = tokenText(*d.customName);
 			auto sym = scopeManager.lookup(name);
 
-			if (!sym || sym->getKind() != SymbolKind::Struct) {
+			if (!sym || (sym->getKind() != SymbolKind::Struct && sym->getKind() != SymbolKind::Enum)) {
 				reportError("Unknown type: " + name);
 				return prim(BuiltinType::Void);
 			}
@@ -352,6 +399,10 @@ TypeDesc TypeChecker::toDesc(const std::shared_ptr<Type>& type) const {
 		case TypeKind::Struct:
 			d.type = DataType::Custom;
 			d.customTypeName = static_cast<const StructType*>(type.get())->getName();
+			break;
+		case TypeKind::Enum:
+			d.type = DataType::Custom;
+			d.customTypeName = static_cast<const EnumType*>(type.get())->getName();
 			break;
 		case TypeKind::Array: {
 			auto* arrType = static_cast<const ArrayType*>(type.get());
@@ -410,8 +461,8 @@ bool TypeChecker::isWritable(Expression& e) {
 		if (!ma->object) return false;
 		Expression& obj = *ma->object;
 		if (dynamic_cast<IdentifierExpr*>(&obj) ||
-		    dynamic_cast<MemberAccessExpr*>(&obj) ||
-		    dynamic_cast<ArrayIndexExpr*>(&obj))
+				dynamic_cast<MemberAccessExpr*>(&obj) ||
+				dynamic_cast<ArrayIndexExpr*>(&obj))
 			return isWritable(obj);
 		auto ty = typeOf(obj);
 		return isRefType(ty) && static_cast<const ReferenceType*>(ty.get())->isMutable();
@@ -489,6 +540,9 @@ void TypeChecker::initialize(const ExprPtr& m) {
 			else if (auto* structObj = dynamic_cast<StructDeclExpr*>(expr.get()))
 			{
 				this->declareStructures(*structObj);
+			}
+			else if (auto* enumObj = dynamic_cast<EnumDeclExpr*>(expr.get())) {
+				this->declareEnum(*enumObj);
 			}
 		}
 	}
@@ -663,31 +717,335 @@ bool isTypeCompatible(const std::shared_ptr<Type>& expected, const Type* actual)
 	return expected->equals(actual);
 }
 
+// ---------- Enums, Match & Switch ----------
+
+void TypeChecker::visit(EnumDeclExpr& node) {
+	if (!declaredEnums_.count(&node)) declareEnum(node);
+	currentType = prim(BuiltinType::Void);
+}
+
+void TypeChecker::visit(EnumCreateExpr& node) {
+	auto sym = scopeManager.lookup(node.enumName);
+	if (!sym || sym->getKind() != SymbolKind::Enum) {
+		reportError(node.line, node.col, "Unknown enum type: " + node.enumName);
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto enumType = sym->getType();
+	auto* enumTy = static_cast<EnumType*>(enumType.get());
+	const auto* variant = enumTy->getVariant(node.variantName);
+	if (!variant) {
+		reportError(node.line, node.col,
+			"Enum '" + enumTy->getName() + "' has no variant named '" + node.variantName + "'");
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	const auto& expectedFields = variant->payloadFields;
+	if (expectedFields.size() != node.args.size()) {
+		reportError(node.line, node.col,
+			"Variant '" + enumTy->getName() + "::" + variant->name + "' expects " +
+			std::to_string(expectedFields.size()) + " argument(s), got " +
+			std::to_string(node.args.size()));
+	}
+
+	size_t checkCount = std::min(expectedFields.size(), node.args.size());
+	for (size_t i = 0; i < checkCount; ++i) {
+		if (!node.args[i]) continue;
+		auto argTy = valueTypeOf(*node.args[i]);
+		if (!isTypeCompatible(expectedFields[i].type, argTy.get())) {
+			reportError(node.line, node.col,
+				"Argument " + std::to_string(i + 1) + " of variant '" + variant->name +
+				"': expected " + expectedFields[i].type->toString() + " but got " + argTy->toString());
+		}
+	}
+
+	currentType = enumType;
+}
+
+void TypeChecker::visit(EnumGetExpr& node) {
+	if (!node.target) {
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto baseType = stripRef(typeOf(*node.target));
+	if (baseType->getKind() != TypeKind::Enum) {
+		reportError(node.line, node.col,
+			"Enum payload access applied to non-enum type: " + baseType->toString());
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto* enumTy = static_cast<EnumType*>(baseType.get());
+
+	// Handle `EnumName::VariantName` when `target` is the enum type itself
+	if (!node.expectedVariant && node.kind == EnumGetKind::NamedField) {
+		if (const auto* variant = enumTy->getVariant(node.fieldName)) {
+			(void)variant;
+			currentType = baseType;
+			return;
+		}
+	}
+
+	if (node.expectedVariant) {
+		const auto* variant = enumTy->getVariant(*node.expectedVariant);
+		if (!variant) {
+			reportError(node.line, node.col,
+				"Enum '" + enumTy->getName() + "' has no variant named '" + *node.expectedVariant + "'");
+			currentType = prim(BuiltinType::Void);
+			return;
+		}
+
+		if (node.kind == EnumGetKind::NamedField) {
+			for (const auto& f : variant->payloadFields) {
+				if (f.name == node.fieldName) {
+					currentType = f.type;
+					return;
+				}
+			}
+			reportError(node.line, node.col,
+				"Variant '" + variant->name + "' has no field named '" + node.fieldName + "'");
+			currentType = prim(BuiltinType::Void);
+			return;
+		}
+
+		if (node.fieldIndex >= variant->payloadFields.size()) {
+			reportError(node.line, node.col,
+				"Variant '" + variant->name + "' has no payload field at index " +
+				std::to_string(node.fieldIndex));
+			currentType = prim(BuiltinType::Void);
+			return;
+		}
+
+		currentType = variant->payloadFields[node.fieldIndex].type;
+		return;
+	}
+
+	if (node.kind == EnumGetKind::NamedField) {
+		for (const auto& v : enumTy->getVariants()) {
+			for (const auto& f : v.payloadFields) {
+				if (f.name == node.fieldName) {
+					currentType = f.type;
+					return;
+				}
+			}
+		}
+		reportError(node.line, node.col,
+			"Enum '" + enumTy->getName() + "' has no payload field named '" + node.fieldName + "'");
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	for (const auto& v : enumTy->getVariants()) {
+		if (node.fieldIndex < v.payloadFields.size()) {
+			currentType = v.payloadFields[node.fieldIndex].type;
+			return;
+		}
+	}
+
+	reportError(node.line, node.col,
+		"Enum '" + enumTy->getName() + "' has no payload field at index " +
+		std::to_string(node.fieldIndex));
+	currentType = prim(BuiltinType::Void);
+}
+
+void TypeChecker::visit(MatchExpr& node) {
+	if (!node.scrutinee) {
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto scrType = valueTypeOf(*node.scrutinee);
+	if (scrType->getKind() != TypeKind::Enum) {
+		reportError(node.line, node.col,
+			"'match' requires an enum value, got " + scrType->toString());
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto* enumTy = static_cast<EnumType*>(scrType.get());
+	bool hasWildcard = false;
+	std::unordered_set<std::string> coveredVariants;
+	std::shared_ptr<Type> commonArmType = nullptr;
+	bool mixedArmTypes = false;
+
+	for (const auto& arm : node.arms) {
+		if (arm.pattern.kind == MatchPattern::Kind::Wildcard) {
+			hasWildcard = true;
+
+			if (arm.guard && *arm.guard) {
+				auto guardTy = valueTypeOf(**arm.guard);
+				if (!isPrim(guardTy, BuiltinType::Bool)) {
+					reportError(node.line, node.col,
+						"Match guard must be bool, got " + guardTy->toString());
+				}
+			}
+
+			scopeManager.enterScope();
+			auto bodyTy = arm.body ? typeOf(*arm.body) : prim(BuiltinType::Void);
+			scopeManager.exitScope();
+
+			if (!commonArmType) commonArmType = bodyTy;
+			else if (!commonArmType->equals(bodyTy.get())) mixedArmTypes = true;
+			continue;
+		}
+
+		if (arm.pattern.enumName && *arm.pattern.enumName != enumTy->getName()) {
+			reportError(node.line, node.col,
+				"Pattern enum '" + *arm.pattern.enumName +
+				"' does not match scrutinee type '" + enumTy->getName() + "'");
+		}
+
+		const auto* variant = enumTy->getVariant(arm.pattern.variantName);
+		if (!variant) {
+			reportError(node.line, node.col,
+				"Enum '" + enumTy->getName() + "' has no variant named '" +
+				arm.pattern.variantName + "'");
+			continue;
+		}
+
+		scopeManager.enterScope();
+
+		if (!arm.pattern.bindingNames.empty()) {
+			if (arm.pattern.bindingNames.size() != variant->payloadFields.size()) {
+				reportError(node.line, node.col,
+					"Variant '" + variant->name + "' has " +
+					std::to_string(variant->payloadFields.size()) +
+					" payload field(s), got " +
+					std::to_string(arm.pattern.bindingNames.size()) + " binding(s)");
+			}
+
+			size_t bindCount = std::min(arm.pattern.bindingNames.size(), variant->payloadFields.size());
+			for (size_t i = 0; i < bindCount; ++i) {
+				const std::string& bindName = arm.pattern.bindingNames[i];
+				if (bindName == "_") continue;
+
+				auto bindSym = std::make_shared<VarSymbol>(
+					bindName, variant->payloadFields[i].type, /*isInitialized=*/true);
+				localInfo_[bindSym.get()] = {};
+				if (!scopeManager.declare(bindName, bindSym)) {
+					reportError(node.line, node.col,
+						"Duplicate pattern binding '" + bindName + "'");
+				}
+			}
+		}
+
+		if (arm.guard && *arm.guard) {
+			auto guardTy = valueTypeOf(**arm.guard);
+			if (!isPrim(guardTy, BuiltinType::Bool)) {
+				reportError(node.line, node.col,
+					"Match guard must be bool, got " + guardTy->toString());
+			}
+		}
+
+		auto bodyTy = arm.body ? typeOf(*arm.body) : prim(BuiltinType::Void);
+		scopeManager.exitScope();
+
+		if (!arm.guard.has_value()) {
+			coveredVariants.insert(variant->name);
+		}
+
+		if (!commonArmType) commonArmType = bodyTy;
+		else if (!commonArmType->equals(bodyTy.get())) mixedArmTypes = true;
+	}
+
+	if (!hasWildcard) {
+		std::vector<std::string> missing;
+		for (const auto& v : enumTy->getVariants()) {
+			if (!coveredVariants.count(v.name)) {
+				missing.push_back(v.name);
+			}
+		}
+		if (!missing.empty()) {
+			std::string msg = "Non-exhaustive match on '" + enumTy->getName() + "': missing ";
+			for (size_t i = 0; i < missing.size(); ++i) {
+				if (i > 0) msg += ", ";
+				msg += missing[i];
+			}
+			reportError(node.line, node.col, msg,
+				"Add arms for missing variants or a '_' wildcard arm.");
+		}
+	}
+
+	currentType = (commonArmType && !mixedArmTypes) ? commonArmType : prim(BuiltinType::Void);
+}
+
+void TypeChecker::visit(SwitchExpr& node) {
+	if (!node.value) {
+		currentType = prim(BuiltinType::Void);
+		return;
+	}
+
+	auto scrType = valueTypeOf(*node.value);
+	if (scrType->getKind() == TypeKind::Enum) {
+		auto* enumTy = static_cast<EnumType*>(scrType.get());
+		if (enumTy->hasAnyPayload()) {
+			reportError(node.line, node.col,
+				"Use 'match' instead of 'switch' for tagged enums with payloads ('" +
+				enumTy->getName() + "')");
+		}
+	}
+
+	std::shared_ptr<Type> commonBodyType = nullptr;
+	bool mixedBodyTypes = false;
+
+	for (const auto& swCase : node.cases) {
+		if (!swCase.isWildcard) {
+			for (const auto& lbl : swCase.labels) {
+				if (!lbl) continue;
+				auto lblType = valueTypeOf(*lbl);
+				if (!scrType->equals(lblType.get())) {
+					reportError(node.line, node.col,
+						"Switch case label type mismatch: expected " + scrType->toString() +
+						" but got " + lblType->toString());
+				}
+			}
+		}
+
+		scopeManager.enterScope();
+		auto bodyTy = swCase.body ? typeOf(*swCase.body) : prim(BuiltinType::Void);
+		scopeManager.exitScope();
+
+		if (!commonBodyType) commonBodyType = bodyTy;
+		else if (!commonBodyType->equals(bodyTy.get())) mixedBodyTypes = true;
+	}
+
+	currentType = (commonBodyType && !mixedBodyTypes) ? commonBodyType : prim(BuiltinType::Void);
+}
+
+// ---------- Other ASTVisitor Nodes (if pure virtual on ASTVisitor) ----------
+
+void TypeChecker::visit(BreakExpr& /*node*/) {
+	currentType = prim(BuiltinType::Void);
+}
+
+void TypeChecker::visit(ContinueExpr& /*node*/) {
+	currentType = prim(BuiltinType::Void);
+}
+
+
+
 void TypeChecker::visit(CallExpr& node) {
 	if (!node.callee) { currentType = prim(BuiltinType::Void); return; }
 
-	// Compiler builtins whose result type depends on the call. A user-defined
-	// function with the same name wins (the lookup below would find it).
 	if (auto* id = dynamic_cast<IdentifierExpr*>(node.callee.get())) {
 		if (!scopeManager.lookup(id->name)) {
-
-			// Random() -> float in [0, 1)
 			if (id->name == "Random") {
 				if (!node.arguments.empty())
 					reportError(node.line, node.col, "Random takes no arguments");
 				currentType = prim(BuiltinType::Float);
 				return;
 			}
-		
-			// Read() -> outputs typed string
+
 			if (id->name == "Read") {
 				if (!node.arguments.empty())
-					reportError(node.line, node.col, "Random takes no arguments");
+					reportError(node.line, node.col, "Read takes no arguments");
 				currentType = prim(BuiltinType::Str);
 				return;
 			}
 
-			// Range(end) / Range(start, end) / Range(start, end, step) -> int[N]
 			if (id->name == "Range") {
 				size_t n = node.arguments.size();
 				currentType = prim(BuiltinType::Void);
@@ -712,6 +1070,39 @@ void TypeChecker::visit(CallExpr& node) {
 				currentType = std::make_shared<ArrayType>(prim(BuiltinType::Int),
 						static_cast<size_t>(-1));
 				return;
+			}
+		}
+	}
+
+	// Support enum variant constructors like `Test::IsHuman(5)` parsed as CallExpr(EnumGetExpr(...), args)
+	if (auto* enumGet = dynamic_cast<EnumGetExpr*>(node.callee.get())) {
+		auto enumBase = enumGet->target ? stripRef(typeOf(*enumGet->target)) : prim(BuiltinType::Void);
+		if (enumBase->getKind() == TypeKind::Enum) {
+			auto* enumTy = static_cast<EnumType*>(enumBase.get());
+			if (!enumGet->expectedVariant && enumGet->kind == EnumGetKind::NamedField) {
+				if (const auto* variant = enumTy->getVariant(enumGet->fieldName)) {
+					const auto& expectedFields = variant->payloadFields;
+					if (expectedFields.size() != node.arguments.size()) {
+						reportError(node.line, node.col,
+							"Variant '" + enumTy->getName() + "::" + variant->name + "' expects " +
+							std::to_string(expectedFields.size()) + " argument(s), got " +
+							std::to_string(node.arguments.size()));
+					}
+
+					size_t checkCount = std::min(expectedFields.size(), node.arguments.size());
+					for (size_t i = 0; i < checkCount; ++i) {
+						if (!node.arguments[i]) continue;
+						auto argTy = valueTypeOf(*node.arguments[i]);
+						if (!isTypeCompatible(expectedFields[i].type, argTy.get())) {
+							reportError(node.line, node.col,
+								"Argument " + std::to_string(i + 1) + " of variant '" + variant->name +
+								"': expected " + expectedFields[i].type->toString() + " but got " + argTy->toString());
+						}
+					}
+
+					currentType = enumBase;
+					return;
+				}
 			}
 		}
 	}
@@ -743,7 +1134,6 @@ void TypeChecker::visit(CallExpr& node) {
 		}
 	}
 
-	// Unsigned parameters can't receive a negative constant.
 	if (auto* id = dynamic_cast<IdentifierExpr*>(node.callee.get())) {
 		auto it = fnParamUnsigned_.find(id->name);
 		if (it != fnParamUnsigned_.end()) {
@@ -821,11 +1211,11 @@ void TypeChecker::visit(ArrayAllocExpr& node) {
 		auto initType = valueTypeOf(**node.initExpr);
 		if (!declared->equals(initType.get())) {
 			reportError(
-				node.line,
-				node.col,
-				"Array initializer type mismatch in '" + node.name + "': expected " +
+					node.line,
+					node.col,
+					"Array initializer type mismatch in '" + node.name + "': expected " +
 					declared->toString() + " but got " + initType->toString()
-			);
+					);
 		}
 		if (isUnsignedDesc(node.type)) {
 			checkNoNegativeConst(**node.initExpr, "array '" + node.name + "'");
@@ -967,7 +1357,7 @@ void TypeChecker::visit(BinaryExpr& node) {
 
 	// Unsignedness flows through arithmetic.
 	bool arith = node.op == BinaryOp::Add || node.op == BinaryOp::Sub || node.op == BinaryOp::Mul ||
-	             node.op == BinaryOp::Div || node.op == BinaryOp::Mod || node.op == BinaryOp::Power;
+		node.op == BinaryOp::Div || node.op == BinaryOp::Mod || node.op == BinaryOp::Power;
 	if (arith && (unsignedExprs_.count(node.left.get()) || unsignedExprs_.count(node.right.get())))
 		unsignedExprs_.insert(&node);
 }
@@ -1052,8 +1442,8 @@ void TypeChecker::visit(ForExpr& node) {
 		if (auto arrType = std::dynamic_pointer_cast<ArrayType>(iterType)) {
 			if (elemType && !elemType->equals(arrType->getElementType().get())) {
 				reportError(node.line, node.col,
-					"For loop variable type " + elemType->toString() +
-					" does not match iterable element type " + arrType->getElementType()->toString());
+						"For loop variable type " + elemType->toString() +
+						" does not match iterable element type " + arrType->getElementType()->toString());
 			}
 			if (unsignedExprs_.count(node.iterable.get()) && node.itemDecl) {
 				unsignedExprs_.insert(node.itemDecl.get());
@@ -1114,6 +1504,14 @@ void TypeChecker::visit(ImportExpr& node) {
 					auto structType = buildStructureType(*structure);
 					auto sym = std::make_shared<StructSymbol>(structure->name, structType);
 					scopeManager.declare(structure->name, sym);
+				}
+			}
+			else if (auto* enumDecl = dynamic_cast<EnumDeclExpr*>(expr.get())) {
+				if (enumDecl->isPublic) {
+					if (node.isSelectiveImport && !(std::find(node.importedSymbols.begin(), node.importedSymbols.end(), enumDecl->name) != node.importedSymbols.end())) continue;
+
+					auto sym = std::make_shared<EnumSymbol>(enumDecl->name, buildEnumType(*enumDecl));
+					scopeManager.declare(enumDecl->name, sym);
 				}
 			}
 		}

@@ -7,6 +7,7 @@ enum class TypeKind {
 	Function,
 	Struct,
 	Reference,
+	Enum,
 	Array
 };
 

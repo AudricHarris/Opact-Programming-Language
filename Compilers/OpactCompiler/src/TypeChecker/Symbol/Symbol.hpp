@@ -6,6 +6,7 @@
 enum class SymbolKind {
 	Variable,
 	Function,
+	Enum,
 	Struct
 };
 

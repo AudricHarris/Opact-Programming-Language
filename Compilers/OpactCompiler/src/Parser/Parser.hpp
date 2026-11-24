@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <iostream>
 #include <vector>
 
 class CompilerPipeline;
@@ -155,5 +156,52 @@ class Parser {
 		ExprPtr parseArrayLiteral();
 };
 
+
+struct ExprTypePrinter : ASTVisitor {
+	void print(const ExprPtr& expr) {
+		if (!expr) {
+			std::cout << "test";
+			std::cout << "<null ExprPtr>\n";
+			return;
+		}
+		// accept() is non-const on Expression, so cast if printing from a const ExprPtr&
+		const_cast<Expression&>(*expr).accept(*this);
+	}
+
+	void visit(LiteralExpr& node) override      { std::cout << "LiteralExpr\n"; }
+	void visit(IdentifierExpr& node) override   { std::cout << "IdentifierExpr (" << node.name << ")\n"; }
+	void visit(BinaryExpr& node) override       { std::cout << "BinaryExpr\n"; }
+	void visit(UnaryExpr& node) override        { std::cout << "UnaryExpr\n"; }
+	void visit(PostfixExpr& node) override      { std::cout << "PostfixExpr\n"; }
+	void visit(BorrowExpr& node) override       { std::cout << "BorrowExpr\n"; }
+	void visit(CallExpr& node) override         { std::cout << "CallExpr\n"; }
+	void visit(GenericCallExpr& node) override  { std::cout << "GenericCallExpr\n"; }
+	void visit(StructCreateExpr& node) override { std::cout << "StructCreateExpr\n"; }
+	void visit(StructDeclExpr& node) override   { std::cout << "StructDeclExpr (" << node.name << ")\n"; }
+	void visit(CastExpr& node) override         { std::cout << "CastExpr\n"; }
+	void visit(AssignExpr& node) override       { std::cout << "AssignExpr\n"; }
+	void visit(VarDeclExpr& node) override      { std::cout << "VarDeclExpr (" << node.name.getWord() << ")\n"; }
+	void visit(Block& node) override            { std::cout << "Block\n"; }
+	void visit(IfExpr& node) override           { std::cout << "IfExpr\n"; }
+	void visit(WhileExpr& node) override        { std::cout << "WhileExpr\n"; }
+	void visit(ForExpr& node) override          { std::cout << "ForExpr\n"; }
+	void visit(LoopExpr& node) override         { std::cout << "LoopExpr\n"; }
+	void visit(MemberAccessExpr& node) override { std::cout << "MemberAccessExpr (." << node.memberName << ")\n"; }
+	void visit(ArrayIndexExpr& node) override   { std::cout << "ArrayIndexExpr\n"; }
+	void visit(ArrayLiteralExpr& node) override { std::cout << "ArrayLiteralExpr\n"; }
+	void visit(ArrayAllocExpr& node) override   { std::cout << "ArrayAllocExpr\n"; }
+	void visit(TupleLiteralExpr& node) override { std::cout << "TupleLiteralExpr\n"; }
+	void visit(YieldExpr& node) override        { std::cout << "YieldExpr\n"; }
+	void visit(BreakExpr& node) override        { std::cout << "BreakExpr\n"; }
+	void visit(ReturnExpr& node) override       { std::cout << "ReturnExpr\n"; }
+	void visit(ContinueExpr& node) override     { std::cout << "ContinueExpr\n"; }
+	void visit(ImportExpr& node) override       { std::cout << "ImportExpr\n"; }
+	void visit(FunctionDeclExpr& node) override { std::cout << "FunctionDeclExpr (" << node.name << ")\n"; }
+	void visit(EnumDeclExpr& node) override     { std::cout << "EnumDeclExpr (" << node.name << ")\n"; }
+	void visit(EnumCreateExpr& node) override   { std::cout << "EnumCreateExpr (" << node.enumName << ")\n"; }
+	void visit(EnumGetExpr& node) override      { std::cout << "EnumGetExpr (" << node.fieldName << ")\n"; }
+	void visit(MatchExpr& node) override        { std::cout << "MatchExpr\n"; }
+	void visit(SwitchExpr& node) override       { std::cout << "SwitchExpr\n"; }
+};
 
 #endif // !PARSER_H
